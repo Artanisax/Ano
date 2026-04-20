@@ -43,7 +43,9 @@ class AnonSystem(pl.LightningModule):
         # 损失函数
         self.l_spk = SpkDistillLoss(cfg['model']['speaker']['dim'], num_speakers)
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], cfg['model']['bottleneck']['codebook_dim'])
-        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'])
+        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'])  # ✅ F0 MSE
+        self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)  # ✅ 新增
+        self.l_mrstft = MultiResolutionSTFTLoss()  # ✅ 新增
         self.l_adv = AdvLoss()
         
         self.automatic_optimization = False
@@ -141,7 +143,7 @@ class AnonSystem(pl.LightningModule):
         # ✅ 判别器步：必须 detach 切断生成器梯度，防止二次反向传播报错
         wav_rec_det = wav_rec.detach()
         y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1))
-        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')  # 判别器损失无需 fmap，传 [] 节省内存
+        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
         
         # 4. 总 Loss 与优化步进
         total = (self.cfg['losses']['lambda_r'] * l_rec + self.cfg['losses']['lambda_a'] * l_adv_g +
@@ -174,19 +176,29 @@ class AnonSystem(pl.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int):
         wav = batch['wav']  # [B, 1, T_max]
-        wav_rec, _, _, _, _, _ = self(wav)  # 仅取重建波形，忽略蒸馏输出
+        wav_rec, _, _, _, _, _ = self(wav)  # wav_rec: [B, T_max]
         
-        # ───────── 1. 重建损失 ─────────
+        # ───────── 1. Mel 重建损失 ─────────
         mel_gt = self._compute_mel_3d(wav)
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
-        T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
-        l_rec = F.l1_loss(mel_rec[..., :T_min], mel_gt[..., :T_min]) + \
-                F.mse_loss(mel_rec[..., :T_min], mel_gt[..., :T_min])
+        T_min_mel = min(mel_rec.shape[-1], mel_gt.shape[-1])
+        l_rec = F.l1_loss(mel_rec[..., :T_min_mel], mel_gt[..., :T_min_mel]) + \
+                F.mse_loss(mel_rec[..., :T_min_mel], mel_gt[..., :T_min_mel])
         
-        # ───────── 2. 日志记录（仅核心指标） ─────────
-        self.log('val/rec', l_rec, prog_bar=True, batch_size=self.cfg['training']['batch_size'])
+        # ───────── 2. MR-STFT 损失（时域多分辨率谱监督） ─────────
+        # 对齐波形长度，防止编解码 stride 导致的 1~2 帧偏差
+        T_min_wave = min(wav_rec.shape[-1], wav.shape[-1])
+        l_mrstft = self.l_mrstft(
+            wav_rec[:, :T_min_wave],          # [B, T]
+            wav[:, 0, :T_min_wave]            # [B, T]
+        )
         
-        # ───────── 3. 音频日志（每次验证运行记录一次，已归一化防削波） ─────────
+        # ───────── 3. 日志记录 ─────────
+        bs = self.cfg['training']['batch_size']
+        self.log('val/rec', l_rec, prog_bar=True, batch_size=bs)
+        self.log('val/mrstft', l_mrstft, prog_bar=False, batch_size=bs)  # ✅ 新增监控
+        
+        # ───────── 4. 音频日志（仅 rank 0 且 batch_idx=0 时记录） ─────────
         if self.global_rank == 0 and batch_idx == 0:
             sr = self.cfg['model']['sample_rate']
             step = self.global_step

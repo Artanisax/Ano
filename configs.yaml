@@ -31,9 +31,9 @@ training:
   batch_size: 24 # 48GB VRAM with bf16-mixed precision
   # accumulate_grad_batches: 4 # Automatic gradient accumulation is not supported for manual optimization
   max_steps: 500000
-  max_epochs: 10
+  max_epochs: 6
   lr: 1.5e-4  # 2.0e-4 / 32 * 24
-  gamma: 0.9
+  gamma: 0.5
   betas: [0.8, 0.999]
   weight_decay: 1.0e-5
   num_workers: 8
@@ -53,7 +53,9 @@ losses:
   lambda_c: 0.1
   lambda_s: 1.0
   lambda_l: 1.0
-  lambda_e: 1.0
+  lambda_e: 1.0           # ✅ 专用于 F0 Log MSE
+  lambda_e_chroma: 0.125  # ✅ 新增：Chroma 辅助蒸馏权重
+  lambda_mrstft: 2        # ✅ 新增：多分辨率谱损失权重（参考 HiFi-GAN λ_feat=2.0）
 
 preprocess:
   f0_min: 60.0

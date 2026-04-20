@@ -58,43 +58,59 @@ class VPDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         e = self.entries[idx]
-        wav = load_audio(e['wav'])  # [1, T_raw]
-        # 短音频右侧零填充，确保训练裁剪安全
+        wav = load_audio(e['wav'])
         if wav.shape[-1] < self.T:
-            wav = F.pad(wav, (0, self.T - wav.shape[-1]))  # [1, T]
+            wav = F.pad(wav, (0, self.T - wav.shape[-1]))
             
         uid = os.path.basename(e['wav']).split('.')[0]
         
-        # F0 加载/动态提取
+        # F0 加载
         f0_path = os.path.join(self.f0_dir, f"{uid}.npy")
         if self.use_cache and os.path.exists(f0_path):
             f0_full = torch.tensor(np.load(f0_path), dtype=torch.float32)
         else:
             f0_full = extract_f0_aligned(wav.squeeze().numpy(), target_frames=wav.shape[-1] // self.S)
         
+        # ✅ Chroma 加载（可选）
+        chroma_dir = self.cfg['data'].get('chroma_dir')
+        chroma_full = None
+        if chroma_dir and self.use_cache:
+            chroma_path = os.path.join(chroma_dir, f"{uid}.npy")
+            if os.path.exists(chroma_path):
+                chroma_full = torch.tensor(np.load(chroma_path), dtype=torch.float32)  # [T, 24]
+        
         # Token 加载
         tok_path = os.path.join(self.tok_dir, f"{uid}.npy")
         tok_full = torch.tensor(np.load(tok_path), dtype=torch.long) if (self.use_cache and os.path.exists(tok_path)) else None
         
         if self.training:
-            # 随机采样 3 个对齐片段：0=主重建, 1=蒸馏参考1, 2=蒸馏参考2
             mx = max(0, wav.shape[-1] - self.T)
             starts = [(random.randint(0, mx) // self.S) * self.S for _ in range(3)]
             ends = [s + self.T for s in starts]
             
-            # ✅ 核心修复：强制 F0/Token 严格对齐到 300 帧，消除边界偏差导致的 stack 崩溃
-            f0_segments = []
-            tok_segments = []
+            # F0/Chroma/Token 对齐逻辑
+            f0_segments, chroma_segments, tok_segments = [], [], []
             for i in range(3):
                 fs, fe = starts[i] // self.S, ends[i] // self.S
+                
+                # F0 对齐
                 f0_seg = f0_full[fs:fe]
-                # 越界截断或不足填充
                 if f0_seg.shape[0] < self.target_frames:
-                    f0_seg = F.pad(f0_seg, (0, self.target_frames - f0_seg.shape[0]), value=60.0)
+                    f0_seg = F.pad(f0_seg, (0, self.target_frames - f0_seg.shape[0]), value=np.log(60.0))  # log-F0 兜底
                 else:
                     f0_seg = f0_seg[:self.target_frames]
                 f0_segments.append(f0_seg)
 
+                # ✅ Chroma 对齐
+                if chroma_full is not None:
+                    c_seg = chroma_full[fs:fe]  # [T_seg, 24]
+                    if c_seg.shape[0] < self.target_frames:
+                        c_seg = F.pad(c_seg, (0, 0, 0, self.target_frames - c_seg.shape[0]), value=0)
+                    else:
+                        c_seg = c_seg[:self.target_frames]
+                    chroma_segments.append(c_seg)
+
+                # Token 对齐
                 if tok_full is not None:
                     tok_seg = tok_full[fs:fe]
                     if tok_seg.shape[0] < self.target_frames:
@@ -106,21 +122,23 @@ class VPDataset(Dataset):
             return {
                 'wav': torch.stack([wav[:, starts[0]:ends[0]], 
                                     wav[:, starts[1]:ends[1]], 
-                                    wav[:, starts[2]:ends[2]]], dim=0),  # [3, 1, T]
-                'f0': torch.stack(f0_segments, dim=0),  # [3, 300] 严格对齐
-                'tok': torch.stack(tok_segments, dim=0) if tok_full is not None else None,  # [3, 300] 严格对齐
+                                    wav[:, starts[2]:ends[2]]], dim=0),
+                'f0': torch.stack(f0_segments, dim=0),  # [3, 300]
+                'chroma': torch.stack(chroma_segments, dim=0) if chroma_segments else None,  # [3, 300, 24] ✅
+                'tok': torch.stack(tok_segments, dim=0) if tok_full is not None else None,
                 'spk': e['spk']
             }
-        # 验证/测试模式：返回完整音频 + 元数据
-        return {'wav': wav, 'f0': f0_full, 'tok': tok_full, 'spk': e['spk'], 'uid': uid}
+        return {'wav': wav, 'f0': f0_full, 'chroma': chroma_full, 'tok': tok_full, 'spk': e['spk'], 'uid': uid}
 
 def collate_fn(batch: list) -> dict:
     # 训练模式：已在 __getitem__ 中强制对齐，直接 stack
-    if batch[0]['wav'].dim() == 3:  # [3, 1, T]
+    if batch[0]['wav'].dim() == 3:  # 训练模式
+        chroma_batch = torch.stack([b['chroma'] for b in batch], dim=0) if batch[0].get('chroma') is not None else None
         return {
-            'wav': torch.stack([b['wav'] for b in batch]),  # [B, 3, 1, T]
-            'f0': torch.stack([b['f0'] for b in batch]),    # [B, 3, 300]
-            'tok': torch.stack([b['tok'] for b in batch]) if batch[0]['tok'] is not None else None,  # [B, 3, 300]
+            'wav': torch.stack([b['wav'] for b in batch]),
+            'f0': torch.stack([b['f0'] for b in batch]),
+            'chroma': chroma_batch,  # ✅ [B, 3, 300, 24]
+            'tok': torch.stack([b['tok'] for b in batch]) if batch[0]['tok'] is not None else None,
             'spk_ids': torch.tensor([b['spk'] for b in batch])
         }
     

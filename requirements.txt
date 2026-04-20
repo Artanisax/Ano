@@ -10,6 +10,7 @@
 # conda install -y -c rapidsai -c nvidia -c conda-forge cuml cuda-version=13.0
 # conda install -y cuda-cudart cuda-version=13
 
+setuptools<81
 pytorch-lightning
 transformers
 vector-quantize-pytorch

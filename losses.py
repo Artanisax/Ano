@@ -26,8 +26,8 @@ class EmoDistillLoss(nn.Module):
         super().__init__()
         self.proj = nn.Linear(dim, 1)
         # 🔑 热启动：log(150Hz) ≈ 5.01，加速收敛
-        # with torch.no_grad():
-        #     self.proj.bias.fill_(5.0)
+        with torch.no_grad():
+            self.proj.bias.fill_(5.0)
     
     def forward(self, q2: torch.Tensor, f0_log: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2).squeeze(-1)  # [B, T]
@@ -58,11 +58,14 @@ class STFTLoss(nn.Module):
         self.register_buffer('window', torch.hann_window(win_size))
     
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # x, y: [B, T]
-        x_spec = torch.stft(x, self.fft_size, self.hop_size, self.win_size, 
-                           window=self.window, return_complex=True, center=False)
-        y_spec = torch.stft(y, self.fft_size, self.hop_size, self.win_size, 
-                           window=self.window, return_complex=True, center=False)
+        # ✅ 关键修复：对齐波形长度，防止解码器 stride 导致的首尾微小偏差
+        min_len = min(x.shape[-1], y.shape[-1])
+        x, y = x[..., :min_len], y[..., :min_len]
+
+        x_spec = torch.stft(x, self.fft_size, self.hop_size, self.win_size,
+                        window=self.window, return_complex=True, center=False)
+        y_spec = torch.stft(y, self.fft_size, self.hop_size, self.win_size,
+                        window=self.window, return_complex=True, center=False)
         
         # 幅度谱 + 对数压缩
         x_mag = torch.abs(x_spec)

@@ -36,7 +36,7 @@ training:
   gamma: 0.5
   betas: [0.8, 0.999]
   weight_decay: 1.0e-5
-  num_workers: 8
+  num_workers: 12
   precision: "bf16"
   # precision: "32"
   target_samples: 96000 # 6s * 16000Hz
@@ -44,8 +44,8 @@ training:
   early_stop_patience: 10
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
-  log_every_n_steps: 1
-  # log_every_n_steps: 100
+  # log_every_n_steps: 1
+  log_every_n_steps: 100
 
 losses:
   lambda_r: 45.0
@@ -54,8 +54,8 @@ losses:
   lambda_s: 1.0
   lambda_l: 1.0
   lambda_e: 1.0           # ✅ 专用于 F0 Log MSE
-  lambda_e_chroma: 0.125  # ✅ 新增：Chroma 辅助蒸馏权重
-  lambda_mrstft: 2        # ✅ 新增：多分辨率谱损失权重（参考 HiFi-GAN λ_feat=2.0）
+  lambda_e_chroma: 1.0    # ✅ 新增：Chroma 辅助蒸馏权重
+  lambda_mrstft: 2.0      # ✅ 新增：多分辨率谱损失权重（参考 HiFi-GAN λ_feat=2.0）
 
 preprocess:
   f0_min: 60.0
@@ -69,8 +69,8 @@ preprocess:
 data:
   # 是否使用缓存的 F0/Token (设为 false 时自动触发动态计算)
   use_cache: true
-  f0_dir: "data/processed/f0_abs"
-  # f0_dir: "data/processed/f0_log"
+  # f0_dir: "data/processed/f0_abs"
+  f0_dir: "data/processed/f0_log"
   chroma_dir : "data/processed/chroma"
   token_dir: "data/processed/tokens"
 

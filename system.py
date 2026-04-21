@@ -111,64 +111,78 @@ class AnonSystem(pl.LightningModule):
     def training_step(self, batch: dict, batch_idx: int):
         opt_g, opt_d = self.optimizers()
         wav = batch['wav']  # [B, 3, 1, T]
-        f0_main = batch['f0'][:, 0]  # [B, T_frames] 仅主段用于情感蒸馏
+        f0_main = batch['f0'][:, 0]  # [B, T_frames]
         tok_main = batch.get('tok')
         tokens = tok_main[:, 0] if tok_main is not None else None  # [B, T_frames]
         spk_ids = batch['spk_ids']  # [B]
         
-        # Token 动态计算（仅主段）
         if not self.use_cache:
-            tokens = self.get_tokens_dynamic(wav[:, 0])  # [B, T_feat]
+            tokens = self.get_tokens_dynamic(wav[:, 0])
             
-        # 前向传播：自动分离主路径与蒸馏路径
-        wav_rec, spk1, spk2, q1, q2, com = self(wav)  # wav_rec:[B,T], spk1/2:[B,256], q1/2:[B,T_feat,128]
+        # 前向传播
+        wav_rec, spk1, spk2, q1, q2, com = self(wav)
         
-        # 1. 重建损失（仅主段）- 使用辅助函数统一维度
-        mel_gt = self._compute_mel_3d(wav[:, 0])  # [B, F, T_mel]
-        mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))  # [B, F, T_mel]
+        # ───────── 1. 重建损失 ─────────
+        mel_gt = self._compute_mel_3d(wav[:, 0])
+        mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
         T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
-        mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]  # [B, F, T_min]
+        mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
+        l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1))
         
-        # 2. 三重蒸馏损失
-        l_spk = self.l_spk(spk1, spk2, spk_ids)  # scalar
-        l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)  # scalar
-        l_emo = self.l_emo(q2, f0_main)  # scalar
+        # ───────── 2. 蒸馏损失 ─────────
+        l_spk = self.l_spk(spk1, spk2, spk_ids)
+        l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
+        l_emo_f0 = self.l_emo(q2, f0_main)
+        chroma_batch = batch.get('chroma')
+        chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
+        l_emo_chroma = self.l_chroma(q2, chroma_main) if chroma_main is not None else torch.tensor(0.0, device=wav.device)
         
-        # 3. 对抗损失（仅主段）
-        # ✅ 生成器步：保留完整计算图，用于更新生成器与判别器特征匹配
+        # ───────── 3. 对抗损失（✅ 补全判别器步） ─────────
+        # 3.1 生成器步
         y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1))
         l_adv_g = self.l_adv(y_dg, y_dr, f_g, f_r, 'gen')
         
-        # ✅ 判别器步：必须 detach 切断生成器梯度，防止二次反向传播报错
+        # ✅ 3.2 判别器步：必须 detach 切断生成器梯度，防止二次反向传播报错
         wav_rec_det = wav_rec.detach()
         y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1))
-        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
+        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')  # 判别器无需 fmap，传 [] 节省显存
         
-        # 4. 总 Loss 与优化步进
-        total = (self.cfg['losses']['lambda_r'] * l_rec + self.cfg['losses']['lambda_a'] * l_adv_g +
-                 self.cfg['losses']['lambda_c'] * com + self.cfg['losses']['lambda_s'] * l_spk +
-                 self.cfg['losses']['lambda_l'] * l_lin + self.cfg['losses']['lambda_e'] * l_emo)
+        # ───────── 4. 总 Loss 与优化步进 ─────────
+        total = (self.cfg['losses']['lambda_r'] * l_rec + 
+                 self.cfg['losses']['lambda_a'] * l_adv_g +
+                 self.cfg['losses']['lambda_c'] * com + 
+                 self.cfg['losses']['lambda_s'] * l_spk +
+                 self.cfg['losses']['lambda_l'] * l_lin + 
+                 self.cfg['losses']['lambda_e'] * l_emo_f0 +
+                 self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
+                 self.cfg['losses']['lambda_mrstft'] * l_mrstft)
                  
+        # 优化生成器
         opt_g.zero_grad()
         self.manual_backward(total)
         torch.nn.utils.clip_grad_norm_(opt_g.param_groups[0]['params'], max_norm=1.0)
         opt_g.step()
         
+        # 优化判别器
         opt_d.zero_grad()
-        self.manual_backward(l_adv_d)
+        self.manual_backward(l_adv_d)  # ✅ 现在 l_adv_d 已定义
         torch.nn.utils.clip_grad_norm_(opt_d.param_groups[0]['params'], max_norm=1.0)
         opt_d.step()
         
+        # 日志记录
         self.log_dict(
             {
                 'train/loss': total,
                 'train/rec': l_rec,
-                'train/adv': l_adv_g,
+                'train/mrstft': l_mrstft,
+                'train/adv_g': l_adv_g,      # ✅ 拆分 adv_g
+                'train/adv_d': l_adv_d,      # ✅ 新增 adv_d 监控
                 'train/com': com,
                 'train/spk': l_spk,
                 'train/lin': l_lin,
-                'train/emo': l_emo,
+                'train/emo_f0': l_emo_f0,
+                'train/emo_chroma': l_emo_chroma,
             },
             prog_bar=True,
             batch_size=self.cfg['training']['batch_size'],

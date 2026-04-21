@@ -26,7 +26,6 @@ class AnonSystem(pl.LightningModule):
         # 核心编解码模块
         self.enc = SpeechEncoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'])
         self.spk_enc = SpeakerEncoder({**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']})
-        # self.spk_proj = nn.Linear(cfg['model']['speaker']['dim'], cfg['model']['hidden_dim'])  # 256 -> 512 对齐
         self.bottleneck = ResidualBottleneck(cfg)
         self.dec = Decoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'])
         self.disc = HiFiGANDiscriminator()
@@ -80,14 +79,17 @@ class AnonSystem(pl.LightningModule):
         
         # ───────── 主重建路径 ─────────
         mel_main_4d = compute_mel(wav_main, self.cfg['model']['n_mels'], 
-                                  self.cfg['model']['sample_rate'], self.cfg['model']['mel_hop_length'])  # [B, 1, F, T_mel]
+                                  self.cfg['model']['sample_rate'], self.cfg['model']['mel_hop_length'])
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
-        spk_main = self.spk_enc(mel_main_4d)            # [B, 256] 用于解耦减法
+        spk_main = self.spk_enc(mel_main_4d)            # [B, 256]
         
-        # r1 = feat_main - self.spk_proj(spk_main).unsqueeze(1)  # [B, T_feat, 512] - [B, 1, 512]
-        r1 = feat_main - spk_main.unsqueeze(1)          # [B, T_feat, 512] - [B, 1, 512]
-        recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512], q1/q2:[B, T_feat, 128], com:scalar
-        wav_rec = self.dec(recon.transpose(1, 2))       # [B, T]
+        # ✅ 串行解耦：减去说话人身份
+        r1 = feat_main - spk_main.unsqueeze(1)          # [B, T_feat, 512]
+        recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
+        
+        # 🔑 核心修复：加回说话人身份用于重建（严格对齐论文 Eq.7 & Figure 1）
+        recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
+        wav_rec = self.dec(recon_with_spk.transpose(1, 2))  # [B, C, T] -> [B, T]
 
         if is_train:
             # ───────── 蒸馏路径：仅提取 s1, s2 用于说话人一致性约束 ─────────

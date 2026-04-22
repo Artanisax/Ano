@@ -29,4 +29,4 @@ salloc \
     -c16 \
     --mem=64G \
     --gres=gpu:1 \
-    -n1
+    -n2

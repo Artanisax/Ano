@@ -50,7 +50,7 @@ def main():
                     w = w.to(device)
                     mel = compute_mel(w, cfg['model']['n_mels'], 16000, cfg['model']['mel_hop_length'])
                     mel = mel.unsqueeze(1)  # ✅ 核心修复：[1, 80, T] -> [1, 1, 80, T] 匹配 2D CNN 的 4D 输入要求
-                    emb = encoder(mel).cpu()
+                    emb = encoder(mel).squeeze(0).cpu()# 🔑 核心修复：提取后立即压平 Batch 维，强制输出 [D]
                     embs.append(emb)
                 except Exception as e:
                     tqdm.write(f"⚠️ 跳过 {p}: {e}")

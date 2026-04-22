@@ -31,7 +31,7 @@ training:
   batch_size: 24 # 48GB VRAM with bf16-mixed precision
   # accumulate_grad_batches: 4 # Automatic gradient accumulation is not supported for manual optimization
   max_steps: 500000
-  max_epochs: 6
+  max_epochs: 10
   lr: 1.5e-4  # 2.0e-4 / 32 * 24
   gamma: 0.5
   betas: [0.8, 0.999]

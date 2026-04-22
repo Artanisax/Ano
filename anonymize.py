@@ -7,27 +7,42 @@ from utils import load_audio, save_audio, compute_mel
 import torch.nn.functional as F
 
 def generate_anonymized_audio(model, wav, alpha, vctk_pool, device):
-    """VPC 2024 标准匿名化推理管线 (严格对齐 Eq.7)"""
+    """
+    VPC 2024 标准匿名化推理管线 (严格对齐论文 §3.1, §3.4, Figure 1)
+    wav: [1, 1, T]
+    vctk_pool: [N_spk, D_spk], 已 L2 归一化
+    """
     with torch.no_grad():
+        # ───────── 1. 提取原始特征与原始说话人身份 ─────────
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
                           model.cfg['model']['sample_rate'], 
-                          model.cfg['model']['mel_hop_length'])
-        feat = model.enc(wav)
+                          model.cfg['model']['mel_hop_length'])  # [1, 1, 80, T_mel]
+        feat = model.enc(wav)                     # [1, T_feat, 512]
+        s_orig = model.spk_enc(mel)               # [1, 256] ✅ 原始身份（用于解耦减法）
         
-        # 1. 随机抽取 20 个候选说话人并平均 (s̄)
+        # ───────── 2. 构造匿名身份 s_anon (Eq.7) ─────────
+        # 2.1 随机抽取 20 个候选说话人并平均 (s̄)
         pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
-        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)
+        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)  # [1, 256]
         
-        # 2. 生成高斯随机身份 (ŝ)
-        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
+        # 2.2 生成高斯随机身份 (ŝ)
+        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)  # [1, 256]
         
-        # 3. 加权融合 (Eq.7)
-        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat
+        # 2.3 加权融合得到匿名身份 (s_anon)
+        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 256] ✅ 匿名身份（用于重建加法）
         
-        # 4. 串行解耦与重建
-        r1 = feat - s_anon.unsqueeze(1)
-        recon, _, _, _ = model.bottleneck(r1)
-        wav_anon = model.dec(recon.transpose(1, 2))
+        # ───────── 3. 串行解耦：减去原始身份 ─────────
+        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512] - [1, 1, 256] 广播对齐
+        recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
+        
+        # ───────── 4. 重建：加回匿名身份 ─────────
+        recon_with_anon = recon + s_anon.unsqueeze(1)  # [1, T_feat, 512]
+        
+        # 防御性维度对齐（处理可能的冗余 1 维）
+        if recon_with_anon.dim() == 4:
+            recon_with_anon = recon_with_anon.squeeze(2)  # [1, T, 1, C] -> [1, T, C]
+        wav_anon = model.dec(recon_with_anon.transpose(1, 2))  # [1, C, T] -> [1, T]
+        
         return wav_anon
 
 def main():

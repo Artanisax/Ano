@@ -3,7 +3,7 @@ import yaml, torch, argparse, os, glob, json
 from pathlib import Path
 from tqdm import tqdm
 from system import AnonSystem
-from utils import load_audio, save_audio, compute_mel
+from utils import load_audio, save_audio, compute_mel, normalize_audio
 import torch.nn.functional as F
 
 def generate_anonymized_audio(model, wav, alpha, vctk_pool, device):
@@ -117,8 +117,8 @@ def main():
                 out_path = os.path.join(args.output, f"{fname}_anon.wav")
                 
                 wav = load_audio(f_path).to(args.device).unsqueeze(0)
-                anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device)
-                save_audio(anon_wav.cpu(), out_path)
+                anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device).cpu()
+                save_audio(normalize_audio(anon_wav), out_path)
                 success += 1
             except Exception as e:
                 tqdm.write(f"❌ 失败 {Path(f_path).name}: {e}")

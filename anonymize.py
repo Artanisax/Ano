@@ -1,5 +1,5 @@
 # anonymize.py
-import yaml, torch, argparse, os, glob
+import yaml, torch, argparse, os, glob, json
 from pathlib import Path
 from tqdm import tqdm
 from system import AnonSystem
@@ -18,29 +18,25 @@ def generate_anonymized_audio(model, wav, alpha, vctk_pool, device):
                           model.cfg['model']['sample_rate'], 
                           model.cfg['model']['mel_hop_length'])  # [1, 1, 80, T_mel]
         feat = model.enc(wav)                     # [1, T_feat, 512]
-        s_orig = model.spk_enc(mel)               # [1, 256] ✅ 原始身份（用于解耦减法）
+        s_orig = model.spk_enc(mel)               # [1, 512] ✅ 原始身份（用于解耦减法）
         
         # ───────── 2. 构造匿名身份 s_anon (Eq.7) ─────────
         # 2.1 随机抽取 20 个候选说话人并平均 (s̄)
         pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
-        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)  # [1, 256]
+        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)  # [1, 512]
         
         # 2.2 生成高斯随机身份 (ŝ)
-        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)  # [1, 256]
+        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)  # [1, 512]
         
         # 2.3 加权融合得到匿名身份 (s_anon)
-        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 256] ✅ 匿名身份（用于重建加法）
+        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512] ✅ 匿名身份（用于重建加法）
         
         # ───────── 3. 串行解耦：减去原始身份 ─────────
-        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512] - [1, 1, 256] 广播对齐
+        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512] - [1, 1, 512] 广播对齐
         recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
         
         # ───────── 4. 重建：加回匿名身份 ─────────
         recon_with_anon = recon + s_anon.unsqueeze(1)  # [1, T_feat, 512]
-        
-        # 防御性维度对齐（处理可能的冗余 1 维）
-        if recon_with_anon.dim() == 4:
-            recon_with_anon = recon_with_anon.squeeze(2)  # [1, T, 1, C] -> [1, T, C]
         wav_anon = model.dec(recon_with_anon.transpose(1, 2))  # [1, C, T] -> [1, T]
         
         return wav_anon
@@ -48,8 +44,8 @@ def generate_anonymized_audio(model, wav, alpha, vctk_pool, device):
 def main():
     parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
-    parser.add_argument('--input', required=True, help='输入音频文件 或 包含音频的目录')
-    parser.add_argument('--output', default=None, help='输出路径 (文件/目录)。若为None则自动生成')
+    parser.add_argument('--input', default='data/raw/LibriSpeech/dev-clean/84/121123', help='输入音频文件 或 包含音频的目录')
+    parser.add_argument('--output', default='outputs', help='输出路径 (文件/目录)。若为None则自动生成')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     parser.add_argument('--ext', nargs='+', default=['.wav', '.flac'], help='支持的音频扩展名')
@@ -74,14 +70,21 @@ def main():
         cfg = yaml.safe_load(f)
         
     print(f"🔹 加载检查点: {args.ckpt}")
-    model = AnonSystem.load_from_checkpoint(args.ckpt, cfg=cfg, strict=False)
-    model.to(args.device)
+    # ✅ 核心修复：直接从 checkpoint 读取真实的 num_speakers，避免形状不匹配
+    ckpt = torch.load(args.ckpt, map_location='cpu')
+    num_speakers = ckpt['state_dict']['l_spk.clf.weight'].shape[0]
+    print(f"🔍 检测到训练期说话人数量: {num_speakers}")
+    
+    model = AnonSystem.load_from_checkpoint(
+        args.ckpt, 
+        cfg=cfg, 
+        num_speakers=num_speakers,  # 🔑 使用真实数量，确保权重形状完全对齐
+        strict=False                # 跳过优化器状态、wavlm 缓存等无关权重
+    ).to(args.device)
     model.eval()  # 锁定 BN/Dropout 行为
     
     print(f"🔹 加载说话人池: {cfg['anonymization']['vctk_pool_path']}")
     vctk_pool = torch.load(cfg['anonymization']['vctk_pool_path'], map_location=args.device)
-    if vctk_pool.dim() == 2:
-        vctk_pool = F.normalize(vctk_pool, dim=1, p=2)  # 防御性归一化
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
     print(f"✅ 环境就绪 | Condition {args.condition} (α={alpha}) | Device: {args.device}\n")
@@ -92,7 +95,7 @@ def main():
         print(f"🎧 处理单文件: {input_path.name}")
         wav = load_audio(str(input_path)).to(args.device).unsqueeze(0)
         anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device)
-        save_audio(anon_wav.squeeze().cpu(), args.output)
+        save_audio(anon_wav.cpu(), args.output)
         print(f"✅ 已保存: {args.output}\n")
         
     elif input_path.is_dir():
@@ -115,7 +118,7 @@ def main():
                 
                 wav = load_audio(f_path).to(args.device).unsqueeze(0)
                 anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device)
-                save_audio(anon_wav.squeeze().cpu(), out_path)
+                save_audio(anon_wav.cpu(), out_path)
                 success += 1
             except Exception as e:
                 tqdm.write(f"❌ 失败 {Path(f_path).name}: {e}")

@@ -99,11 +99,15 @@ def main():
         print(f"✅ 已保存: {args.output}\n")
         
     elif input_path.is_dir():
-        # 目录批量模式
+        # 目录批量模式（递归搜寻所有子目录）
         os.makedirs(args.output, exist_ok=True)
         audio_files = []
         for ext in args.ext:
-            audio_files.extend(glob.glob(str(input_path / f"*{ext}")))
+            # ✅ 使用 **/* 匹配任意深度子目录，recursive=True 开启递归搜索
+            audio_files.extend(glob.glob(str(input_path / f"**/*{ext}"), recursive=True))
+            
+        # 🔹 去重并排序：防止同名扩展名重复匹配，确保处理顺序确定性
+        audio_files = sorted(list(set(audio_files)))
             
         if not audio_files:
             print(f"⚠️ 目录中未找到支持的音频格式 {args.ext}")

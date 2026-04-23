@@ -35,7 +35,7 @@ def load_audio(path: str, sr: int = 16000) -> torch.Tensor:
 def compute_mel(wav: torch.Tensor, n_mels: int = 80, sr: int = 16000, hop: int = 320) -> torch.Tensor:
     # ✅ 修复：将 transform 动态移动到 wav 所在的设备（自动兼容 CPU/GPU）
     mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sr, n_mels=n_mels, n_fft=1024, hop_length=hop
+        sample_rate=sr, n_mels=n_mels, n_fft=1024, win_length=hop * 2, hop_length=hop
     ).to(wav.device)
     mel = mel_transform(wav)
     return torch.log(mel.clamp(min=1e-5))

@@ -3,7 +3,7 @@ import yaml, torch, argparse, os, glob, json
 from pathlib import Path
 from tqdm import tqdm
 from system import AnonSystem
-from utils import load_audio, save_audio, compute_mel, normalize_audio
+from utils import load_audio, save_audio, compute_mel, normalize_audio, get_stft_params
 import torch.nn.functional as F
 
 def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
@@ -15,33 +15,37 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
     """
     with torch.no_grad():
         # ───────── 1. 提取特征与原始身份 ─────────
+        mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
-                          model.cfg['model']['sample_rate'], 
-                          model.cfg['model']['mel_hop_length'])
+                          model.cfg['model']['sample_rate'], **mel_params)
         feat = model.enc(wav)                     # [1, T_feat, 512]
-        s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512] 强制规整维度
+        s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]
         
         # ───────── 2. 串行解耦 (共享路径) ─────────
         r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512]
         recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
-            
-        # ───────── 3. 重建输出：加回原始身份 ─────────
-        recon_rec = recon + s_orig.unsqueeze(1)   # [1, T, 512]
-        wav_rec = model.dec(recon_rec.transpose(1, 2))  # [1, T]
         
-        # ───────── 4. 匿名化输出：加回匿名身份 ─────────
+        # 🔧 防御性维度对齐
+        if recon.dim() == 4:
+            recon = recon.squeeze(2)
+        
+        # ───────── 3. 重建输出：加回原始身份 ─────────
+        recon_rec = recon + s_orig.unsqueeze(1)
+        wav_rec = model.dec(recon_rec.transpose(1, 2))
+        
+        # ───────── 4. 匿名化输出：加回匿名身份 (论文 Eq.7) ─────────
         pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
         s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True).view(1, -1)
         s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
         
-        recon_anon = recon + s_anon.unsqueeze(1)  # [1, T, 512]
-        wav_anon = model.dec(recon_anon.transpose(1, 2))  # [1, T]
+        recon_anon = recon + s_anon.unsqueeze(1)
+        wav_anon = model.dec(recon_anon.transpose(1, 2))
         
         return wav_rec, wav_anon
 
 def main():
-    parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建+匿名)")
+    parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建 + 匿名)")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
     parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
     parser.add_argument('--output', default='outputs', help='输出目录路径')
@@ -53,12 +57,12 @@ def main():
     # ───────── 1. 路径解析 ─────────
     input_path = Path(args.input)
     if not input_path.exists():
-        raise FileNotFoundError(f"❌ 输入路径不存在: {args.input}")
+        raise FileNotFoundError(f"❌ 输入路径不存在：{args.input}")
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ───────── 2. 模型与配置加载 (仅执行一次) ─────────
+    # ───────── 2. 模型与配置加载 ─────────
     with open("configs.yaml") as f: 
         cfg = yaml.safe_load(f)
         
@@ -74,6 +78,9 @@ def main():
     
     print(f"🔹 加载说话人池: {cfg['anonymization']['vctk_pool_path']}")
     vctk_pool = torch.load(cfg['anonymization']['vctk_pool_path'], map_location=args.device)
+    # 防御性归一化
+    if vctk_pool.dim() == 2:
+        vctk_pool = F.normalize(vctk_pool, dim=1, p=2)
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
     print(f"✅ 环境就绪 | Condition {args.condition} (α={alpha}) | Device: {args.device}\n")
@@ -82,7 +89,19 @@ def main():
     if input_path.is_file():
         print(f"🎧 处理单文件: {input_path.name}")
         wav = load_audio(str(input_path)).to(args.device).unsqueeze(0)
+        
+        # 🔧 长度保护：补齐至 hop_length 倍数，防止边界伪影
+        hop_length = cfg['model'].get('mel_hop_length', 256)
+        orig_len = wav.shape[-1]
+        pad_len = (hop_length - orig_len % hop_length) % hop_length
+        if pad_len > 0:
+            wav = F.pad(wav, (0, pad_len), mode='reflect')
+        
         wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+        
+        # 裁剪回原始长度
+        wav_rec = wav_rec[..., :orig_len]
+        wav_anon = wav_anon[..., :orig_len]
         
         base_name = input_path.stem
         save_audio(normalize_audio(wav_rec.cpu()), out_dir / f"{base_name}_rec.wav")
@@ -101,6 +120,8 @@ def main():
             
         print(f"📁 发现 {len(audio_files)} 个音频文件，开始批量处理...\n")
         success, fail = 0, 0
+        hop_length = cfg['model'].get('mel_hop_length', 256)
+        
         for f_path in tqdm(audio_files, desc="Processing", unit="file"):
             try:
                 fname = Path(f_path).stem
@@ -108,7 +129,17 @@ def main():
                 out_anon_path = out_dir / f"{fname}_anon.wav"
                 
                 wav = load_audio(f_path).to(args.device).unsqueeze(0)
+                # 🔧 长度保护
+                orig_len = wav.shape[-1]
+                pad_len = (hop_length - orig_len % hop_length) % hop_length
+                if pad_len > 0:
+                    wav = F.pad(wav, (0, pad_len), mode='reflect')
+                
                 wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+                
+                # 裁剪回原始长度
+                wav_rec = wav_rec[..., :orig_len]
+                wav_anon = wav_anon[..., :orig_len]
                 
                 save_audio(normalize_audio(wav_rec.cpu()), out_rec_path)
                 save_audio(normalize_audio(wav_anon.cpu()), out_anon_path)

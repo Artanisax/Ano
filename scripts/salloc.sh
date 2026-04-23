@@ -26,7 +26,13 @@ salloc \
 salloc \
     -p l40s \
     --qos dcgpu \
-    -c16 \
+    -c28 \
     --mem=64G \
     --gres=gpu:1 \
     -n1
+
+salloc \
+    -p cpu \
+    --qos cpu \
+    -c72 \
+    --mem=256G

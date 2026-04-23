@@ -24,10 +24,6 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
         # ───────── 2. 串行解耦 (共享路径) ─────────
         r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512]
         recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
-        
-        # 防御性清理 Bottleneck 冗余维度
-        if recon.dim() == 4:
-            recon = recon.squeeze(2)              # [1, T, 512]
             
         # ───────── 3. 重建输出：加回原始身份 ─────────
         recon_rec = recon + s_orig.unsqueeze(1)   # [1, T, 512]

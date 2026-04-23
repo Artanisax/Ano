@@ -1,7 +1,7 @@
 # extract_vctk_pool.py
 import os, yaml, torch, torchaudio, glob, argparse
 from tqdm import tqdm
-from models import SpeakerEncoder
+from modules import SpeakerEncoder
 from utils import compute_mel
 import torch.nn.functional as F
 

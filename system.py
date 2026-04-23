@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import joblib
 import os
-from models import *
+from modules import *
 from losses import *
 from utils import setup_logger, compute_mel, save_audio, setup_seed, normalize_audio
 from transformers import WavLMModel

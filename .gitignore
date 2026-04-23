@@ -5,6 +5,7 @@ microsoft/
 preptrained/
 logs/
 runs/
+outputs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

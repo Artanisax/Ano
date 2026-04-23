@@ -6,82 +6,75 @@ from system import AnonSystem
 from utils import load_audio, save_audio, compute_mel, normalize_audio
 import torch.nn.functional as F
 
-def generate_anonymized_audio(model, wav, alpha, vctk_pool, device):
+def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
     """
-    VPC 2024 标准匿名化推理管线 (严格对齐论文 §3.1, §3.4, Figure 1)
+    VPC 2024 双输出推理管线 (严格对齐论文 §3.1, §3.4, Figure 1)
+    共享 Encoder & Bottleneck，分别加回 s_orig 与 s_anon 进行解码
     wav: [1, 1, T]
-    vctk_pool: [N_spk, D_spk], 已 L2 归一化
+    返回: (wav_rec, wav_anon) 均为 [1, T]
     """
     with torch.no_grad():
-        # ───────── 1. 提取原始特征与原始说话人身份 ─────────
+        # ───────── 1. 提取特征与原始身份 ─────────
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
                           model.cfg['model']['sample_rate'], 
-                          model.cfg['model']['mel_hop_length'])  # [1, 1, 80, T_mel]
+                          model.cfg['model']['mel_hop_length'])
         feat = model.enc(wav)                     # [1, T_feat, 512]
-        s_orig = model.spk_enc(mel)               # [1, 512] ✅ 原始身份（用于解耦减法）
+        s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512] 强制规整维度
         
-        # ───────── 2. 构造匿名身份 s_anon (Eq.7) ─────────
-        # 2.1 随机抽取 20 个候选说话人并平均 (s̄)
-        pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
-        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)  # [1, 512]
-        
-        # 2.2 生成高斯随机身份 (ŝ)
-        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)  # [1, 512]
-        
-        # 2.3 加权融合得到匿名身份 (s_anon)
-        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512] ✅ 匿名身份（用于重建加法）
-        
-        # ───────── 3. 串行解耦：减去原始身份 ─────────
-        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512] - [1, 1, 512] 广播对齐
+        # ───────── 2. 串行解耦 (共享路径) ─────────
+        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512]
         recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
         
-        # ───────── 4. 重建：加回匿名身份 ─────────
-        recon_with_anon = recon + s_anon.unsqueeze(1)  # [1, T_feat, 512]
-        wav_anon = model.dec(recon_with_anon.transpose(1, 2))  # [1, C, T] -> [1, T]
+        # 防御性清理 Bottleneck 冗余维度
+        if recon.dim() == 4:
+            recon = recon.squeeze(2)              # [1, T, 512]
+            
+        # ───────── 3. 重建输出：加回原始身份 ─────────
+        recon_rec = recon + s_orig.unsqueeze(1)   # [1, T, 512]
+        wav_rec = model.dec(recon_rec.transpose(1, 2))  # [1, T]
         
-        return wav_anon
+        # ───────── 4. 匿名化输出：加回匿名身份 ─────────
+        pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
+        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True).view(1, -1)
+        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
+        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
+        
+        recon_anon = recon + s_anon.unsqueeze(1)  # [1, T, 512]
+        wav_anon = model.dec(recon_anon.transpose(1, 2))  # [1, T]
+        
+        return wav_rec, wav_anon
 
 def main():
-    parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本")
+    parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建+匿名)")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
-    parser.add_argument('--input', default='data/raw/LibriSpeech/dev-clean/84/121123', help='输入音频文件 或 包含音频的目录')
-    parser.add_argument('--output', default='outputs', help='输出路径 (文件/目录)。若为None则自动生成')
+    parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
+    parser.add_argument('--output', default='outputs', help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     parser.add_argument('--ext', nargs='+', default=['.wav', '.flac'], help='支持的音频扩展名')
     args = parser.parse_args()
 
-    # ───────── 1. 路径解析与自动补全 ─────────
+    # ───────── 1. 路径解析 ─────────
     input_path = Path(args.input)
     if not input_path.exists():
         raise FileNotFoundError(f"❌ 输入路径不存在: {args.input}")
 
-    if args.output is None:
-        if input_path.is_file():
-            base = input_path.stem
-            args.output = str(input_path.parent / f"{base}_anon_cond{args.condition}.wav")
-        elif input_path.is_dir():
-            args.output = str(input_path / f"anon_cond{args.condition}")
-        else:
-            raise ValueError("输入必须是文件或目录")
+    out_dir = Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # ───────── 2. 模型与配置加载 (仅执行一次) ─────────
     with open("configs.yaml") as f: 
         cfg = yaml.safe_load(f)
         
     print(f"🔹 加载检查点: {args.ckpt}")
-    # ✅ 核心修复：直接从 checkpoint 读取真实的 num_speakers，避免形状不匹配
     ckpt = torch.load(args.ckpt, map_location='cpu')
     num_speakers = ckpt['state_dict']['l_spk.clf.weight'].shape[0]
     print(f"🔍 检测到训练期说话人数量: {num_speakers}")
     
     model = AnonSystem.load_from_checkpoint(
-        args.ckpt, 
-        cfg=cfg, 
-        num_speakers=num_speakers,  # 🔑 使用真实数量，确保权重形状完全对齐
-        strict=False                # 跳过优化器状态、wavlm 缓存等无关权重
+        args.ckpt, cfg=cfg, num_speakers=num_speakers, strict=False
     ).to(args.device)
-    model.eval()  # 锁定 BN/Dropout 行为
+    model.eval()
     
     print(f"🔹 加载说话人池: {cfg['anonymization']['vctk_pool_path']}")
     vctk_pool = torch.load(cfg['anonymization']['vctk_pool_path'], map_location=args.device)
@@ -91,22 +84,19 @@ def main():
 
     # ───────── 3. 推理执行 ─────────
     if input_path.is_file():
-        # 单文件模式
         print(f"🎧 处理单文件: {input_path.name}")
         wav = load_audio(str(input_path)).to(args.device).unsqueeze(0)
-        anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device)
-        save_audio(anon_wav.cpu(), args.output)
-        print(f"✅ 已保存: {args.output}\n")
+        wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+        
+        base_name = input_path.stem
+        save_audio(normalize_audio(wav_rec.cpu()), out_dir / f"{base_name}_rec.wav")
+        save_audio(normalize_audio(wav_anon.cpu()), out_dir / f"{base_name}_anon.wav")
+        print(f"✅ 已保存: {out_dir / f'{base_name}_rec.wav'} & {out_dir / f'{base_name}_anon.wav'}\n")
         
     elif input_path.is_dir():
-        # 目录批量模式（递归搜寻所有子目录）
-        os.makedirs(args.output, exist_ok=True)
         audio_files = []
         for ext in args.ext:
-            # ✅ 使用 **/* 匹配任意深度子目录，recursive=True 开启递归搜索
             audio_files.extend(glob.glob(str(input_path / f"**/*{ext}"), recursive=True))
-            
-        # 🔹 去重并排序：防止同名扩展名重复匹配，确保处理顺序确定性
         audio_files = sorted(list(set(audio_files)))
             
         if not audio_files:
@@ -115,20 +105,23 @@ def main():
             
         print(f"📁 发现 {len(audio_files)} 个音频文件，开始批量处理...\n")
         success, fail = 0, 0
-        for f_path in tqdm(audio_files, desc="Anonymizing", unit="file"):
+        for f_path in tqdm(audio_files, desc="Processing", unit="file"):
             try:
                 fname = Path(f_path).stem
-                out_path = os.path.join(args.output, f"{fname}_anon.wav")
+                out_rec_path = out_dir / f"{fname}_rec.wav"
+                out_anon_path = out_dir / f"{fname}_anon.wav"
                 
                 wav = load_audio(f_path).to(args.device).unsqueeze(0)
-                anon_wav = generate_anonymized_audio(model, wav, alpha, vctk_pool, args.device).cpu()
-                save_audio(normalize_audio(anon_wav), out_path)
+                wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+                
+                save_audio(normalize_audio(wav_rec.cpu()), out_rec_path)
+                save_audio(normalize_audio(wav_anon.cpu()), out_anon_path)
                 success += 1
             except Exception as e:
                 tqdm.write(f"❌ 失败 {Path(f_path).name}: {e}")
                 fail += 1
                 
-        print(f"\n🎉 批量完成 | 成功: {success} | 失败: {fail} | 输出目录: {args.output}")
+        print(f"\n🎉 批量完成 | 成功: {success} | 失败: {fail} | 输出目录: {out_dir}")
 
 if __name__ == "__main__":
     main()

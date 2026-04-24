@@ -1,4 +1,5 @@
 .vscode/
+.trae/
 data/
 slurm/
 microsoft/

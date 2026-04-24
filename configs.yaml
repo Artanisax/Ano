@@ -5,6 +5,8 @@ model:
   sample_rate: 16000
   n_mels: 80
   mel_hop_length: 320
+  mel_win_length: 640
+  mel_n_fft: 1024
   hidden_dim: 512
   lstm_layers: 2
   encoder_strides: [2, 4, 5, 8]
@@ -19,32 +21,28 @@ model:
   bottleneck:
     num_quantizers: 8
     codebook_size: 1024
-    codebook_dim: 128
+    codebook_dim: 512
     decay: 0.99
-    commitment_weight: 0.1
+    commitment_weight: 1
     use_cosine_sim: true
     kmeans_init: false
     threshold_ema_dead_code: 2.0
 
 training:
-  # batch_size: 6 # 24GB VRAM with 32 percision
-  batch_size: 24 # 48GB VRAM with bf16-mixed precision
-  # accumulate_grad_batches: 4 # Automatic gradient accumulation is not supported for manual optimization
+  batch_size: 24
   max_steps: 500000
   max_epochs: 10
-  lr: 1.5e-4  # 2.0e-4 / 32 * 24
-  gamma: 0.5
+  lr: 1.5e-4
+  gamma: 0.7
   betas: [0.8, 0.999]
   weight_decay: 1.0e-5
-  num_workers: 12
+  num_workers: 24
   precision: "bf16"
-  # precision: "32"
-  target_samples: 96000 # 6s * 16000Hz
+  target_samples: 96000
   val_check_interval: 0.1
   early_stop_patience: 10
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
-  # log_every_n_steps: 1
   log_every_n_steps: 100
 
 losses:
@@ -53,9 +51,13 @@ losses:
   lambda_c: 0.1
   lambda_s: 1.0
   lambda_l: 1.0
-  lambda_e: 1.0           # ✅ 专用于 F0 Log MSE
-  lambda_e_chroma: 1.0    # ✅ 新增：Chroma 辅助蒸馏权重
-  lambda_mrstft: 2.0      # ✅ 新增：多分辨率谱损失权重（参考 HiFi-GAN λ_feat=2.0）
+  lambda_e_f0: 1.0
+  lambda_e_chroma: 8.0
+  lambda_mrstft: 2.0
+  mrstft_resolutions:
+    - [1024, 160, 640]
+    - [512, 80, 320]
+    - [256, 40, 160]
 
 preprocess:
   f0_min: 60.0
@@ -63,26 +65,33 @@ preprocess:
   wavlm_model: "microsoft/wavlm-large"
   wavlm_layer_idx: 12
   kmeans_n_clusters: 1024
-  kmeans_sample_frames: 4800000 # 6s * 16000Hz * 16000 (utts) / 320 (hop_length)
+  kmeans_sample_frames: 4800000 # for 320 hop length
+  kmeans_sample_frames: 6250000 # for 256 hop length
   kmeans_max_per_utt: 200
 
 data:
-  # 是否使用缓存的 F0/Token (设为 false 时自动触发动态计算)
   use_cache: true
   # f0_dir: "data/processed/f0_abs"
   f0_dir: "data/processed/f0_log"
-  chroma_dir : "data/processed/chroma"
+  chroma_dir: "data/processed/chroma"
   token_dir: "data/processed/tokens"
+  f0_abs_dir: "data/processed/f0_abs"
+  f0_log_dir: "data/processed/f0_log"
 
 anonymization:
   vctk_pool_path: "data/vctk_speaker_vectors.pt"
   num_candidates: 20
   alpha_cond3: 0.9
   alpha_cond4: 0.8
-  anon_dim: 256
+  anon_dim: 512
+
+# 全局默认 STFT 参数（供其他模块回退使用）
+stft:
+  hop_length: 320
+  win_length: 640
+  n_fft: 1024
 
 paths:
-  # raw data
   train_dirs: [
     "data/raw/LibriSpeech/train-clean-100",
     "data/raw/LibriSpeech/train-clean-360",
@@ -91,12 +100,8 @@ paths:
   ]
   val_dirs:   ["data/raw/LibriSpeech/dev-clean", "data/raw/LibriTTS/dev-clean"]
   test_dirs:  ["data/raw/LibriSpeech/test-clean", "data/raw/LibriTTS/test-clean"]
-
-  # processed data
   manifest_dir: "data/processed/manifests"
   kmeans_path:  "data/processed/kmeans/kmeans_model.pkl"
   spk_map_path: "data/processed/spk_map.json"
-
-  # outputs
   log_dir:        "runs/"
   test_out_dir:   "data/anonymized_test/"

@@ -1,5 +1,5 @@
 # utils.py
-import os, logging, random
+import os, logging, random, warnings
 import numpy as np
 import torch
 import torchaudio
@@ -26,30 +26,57 @@ def setup_logger(log_dir: str, name: str = "vpc") -> logging.Logger:
         logger.addHandler(ch)
     return logger
 
+def resample_audio(wav: torch.Tensor, orig_sr: int, target_sr: int = 16000) -> torch.Tensor:
+    """通用重采样函数"""
+    if orig_sr == target_sr:
+        return wav
+    return torchaudio.functional.resample(wav, orig_sr, target_sr)
+
 def load_audio(path: str, sr: int = 16000) -> torch.Tensor:
     wav, orig_sr = torchaudio.load(path)
     if wav.dim() > 1: wav = wav.mean(dim=0, keepdim=True)
-    if orig_sr != sr: wav = torchaudio.functional.resample(wav, orig_sr, sr)
+    if orig_sr != sr: wav = resample_audio(wav, orig_sr, sr)
     return wav
 
-def compute_mel(wav: torch.Tensor, n_mels: int = 80, sr: int = 16000, hop: int = 320) -> torch.Tensor:
-    # ✅ 修复：将 transform 动态移动到 wav 所在的设备（自动兼容 CPU/GPU）
+def compute_mel(wav: torch.Tensor, n_mels: int = 80, sr: int = 16000, 
+                hop: int = 320, win: int = 640, n_fft: int = 1024) -> torch.Tensor:
     mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sr, n_mels=n_mels, n_fft=1024, win_length=hop * 2, hop_length=hop
+        sample_rate=sr, n_mels=n_mels, n_fft=n_fft,
+        win_length=win, hop_length=hop,
+        window_fn=torch.hann_window,
+        center=True,
+        pad_mode="reflect"
     ).to(wav.device)
     mel = mel_transform(wav)
     return torch.log(mel.clamp(min=1e-5))
 
+def get_stft_params(cfg: dict, prefix: str = 'mel') -> dict:
+    """
+    从配置中获取 STFT 相关参数，支持模块级覆盖 + 全局回退
+    返回: {'hop_length': int, 'win_length': int, 'n_fft': int}
+    """
+    model_cfg = cfg.get('model', {})
+    global_cfg = cfg.get('stft', {})
+    
+    def _get(key, default):
+        return model_cfg.get(f'{prefix}_{key}', global_cfg.get(key, default))
+    
+    return {
+        'hop': _get('hop_length', 320),
+        'win': _get('win_length', 640),
+        'n_fft': _get('n_fft', 1024),
+    }
+
 def extract_f0_aligned(wav_np: np.ndarray, sr: int = 16000, f0_min: float = 60.0, 
-                       f0_max: float = 600.0, target_frames: int = None) -> torch.Tensor:
+                       f0_max: float = 600.0, target_frames: int = None, 
+                       hop_length: int = 320) -> torch.Tensor:
+    """通用 F0 提取函数，hop_length 可配置"""
     wav_np = wav_np.squeeze().astype(np.float64)
     
-    # ✅ Harvest 提取（替代 dio+stonemask）
-    frame_period = 320.0 / sr * 1000.0
+    frame_period = hop_length / sr * 1000.0
     f0, t = pyworld.harvest(wav_np, sr, frame_period=frame_period, 
                             f0_floor=f0_min, f0_ceil=f0_max)
     
-    # ✅ 清洗前检验
     if np.any(np.isnan(f0)):
         print(f"[F0-WARN] dynamic F0 提取含 NaN | 数量={np.isnan(f0).sum()}")
     if np.any(np.isinf(f0)):
@@ -94,17 +121,7 @@ def save_audio(wav: torch.Tensor, path: str, sr: int = 16000):
     torchaudio.save(path, wav, sr)
 
 def normalize_audio(wav: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
-    """
-    统一音频响度并避免削波：峰值归一化 + 硬截断保护
-    
-    Args:
-        wav: 输入波形 [*, T]，支持任意前导维度
-        target_peak: 目标峰值 (默认 0.95，留 5% 余量防 TB 截断)
-    
-    Returns:
-        归一化后的波形，范围严格 [-1.0, 1.0]
-    """
     peak = wav.abs().max()
-    if peak > 1e-6:  # 避免除零
+    if peak > 1e-6:
         wav = wav / peak * target_peak
-    return torch.clamp(wav, -1.0, 1.0)  # 最终保护，防止数值溢出
+    return torch.clamp(wav, -1.0, 1.0)

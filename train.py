@@ -43,7 +43,7 @@ def main():
         pin_memory=True,
     )
     
-    tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="NPU-NTU")
+    tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="Ano")
     ckpt_dir = os.path.join(tb_logger.log_dir, "checkpoints")
     model = AnonSystem(cfg, num_speakers=num_spk)
     
@@ -65,14 +65,13 @@ def main():
                 check_finite=True,
                 verbose=True,
             ),
-            LearningRateMonitor(logging_interval="epoch"),
+            LearningRateMonitor(logging_interval="step"),
         ],
         logger=tb_logger,
         precision=cfg['training']['precision'],
         strategy="ddp_find_unused_parameters_true" if torch.cuda.device_count() > 1 else "auto",
         val_check_interval=cfg['training']['val_check_interval'],
         log_every_n_steps=cfg['training']['log_every_n_steps'],
-        # gradient_clip_val=1.0, # Automatic gradient clipping is not supported for manual optimization
         enable_progress_bar=True,
         enable_autolog_hparams=True,
     )

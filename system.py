@@ -5,9 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import joblib
 import os
-from models import *
+from modules import *
 from losses import *
-from utils import setup_logger, compute_mel, save_audio, setup_seed, normalize_audio
+from utils import setup_logger, compute_mel, save_audio, setup_seed, normalize_audio, get_stft_params
 from transformers import WavLMModel
 
 class KMeansPredictor:
@@ -42,9 +42,12 @@ class AnonSystem(pl.LightningModule):
         # 损失函数
         self.l_spk = SpkDistillLoss(cfg['model']['speaker']['dim'], num_speakers)
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], cfg['model']['bottleneck']['codebook_dim'])
-        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'])  # ✅ F0 MSE
-        self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)  # ✅ 新增
-        self.l_mrstft = MultiResolutionSTFTLoss()  # ✅ 新增
+        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'])
+        self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)
+        
+        # ✅ 从 cfg 读取 MR-STFT 配置（支持消融实验）
+        mrstft_resolutions = cfg['losses'].get('mrstft_resolutions')
+        self.l_mrstft = MultiResolutionSTFTLoss(resolutions=mrstft_resolutions)
         self.l_adv = AdvLoss()
         
         self.automatic_optimization = False
@@ -54,16 +57,17 @@ class AnonSystem(pl.LightningModule):
             raise RuntimeError("教师模型未加载。请确保 data.use_cache=False 或预缓存文件完整。")
         with torch.no_grad():
             feats = self.wavlm(wav_flat)  # [B*, T_wavlm, D_wavlm]
-            target = wav_flat.shape[-1] // 320
+            hop_length = self.cfg['model'].get('mel_hop_length', 320)
+            target = wav_flat.shape[-1] // hop_length
             if feats.shape[1] != target:
-                feats = F.interpolate(feats.transpose(1, 2), size=target, mode='linear', align_corners=False).transpose(1, 2)  # [B*, T_feat, D_wavlm]
+                feats = F.interpolate(feats.transpose(1, 2), size=target, mode='linear', align_corners=False).transpose(1, 2)
         return self.kmeans.predict(feats)  # [B*, T_feat]
 
     def _compute_mel_3d(self, wav: torch.Tensor) -> torch.Tensor:
-        """辅助函数：计算 Mel 并统一输出 [B, F, T] 维度，避免重复 .squeeze(1)"""
-        return compute_mel(wav, self.cfg['model']['n_mels'], 
-                          self.cfg['model']['sample_rate'], 
-                          self.cfg['model']['mel_hop_length']).squeeze(1)  # [B, F, T_mel]
+        """辅助函数：计算 Mel 并统一输出 [B, F, T] 维度"""
+        mel_params = get_stft_params(self.cfg, prefix='mel')
+        return compute_mel(wav, n_mels=self.cfg['model']['n_mels'], 
+                          sr=self.cfg['model']['sample_rate'], **mel_params).squeeze(1)
 
     def forward(self, wav: torch.Tensor) -> tuple:
         # 训练期: [B, 3, 1, T] | 验证期: [B, 1, T]
@@ -78,35 +82,31 @@ class AnonSystem(pl.LightningModule):
             wav_s1 = wav_s2 = None
         
         # ───────── 主重建路径 ─────────
+        mel_params = get_stft_params(self.cfg, prefix='mel')
         mel_main_4d = compute_mel(wav_main, self.cfg['model']['n_mels'], 
-                                  self.cfg['model']['sample_rate'], self.cfg['model']['mel_hop_length'])
+                                  self.cfg['model']['sample_rate'], **mel_params)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
-        spk_main = self.spk_enc(mel_main_4d)            # [B, 256]
+        spk_main = self.spk_enc(mel_main_4d)            # [B, 512]
         
-        # ✅ 串行解耦：减去说话人身份
+        # ✅ 串行解耦：减去原始说话人身份（论文 §3.1, Figure 1）
         r1 = feat_main - spk_main.unsqueeze(1)          # [B, T_feat, 512]
         recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
         
-        # 🔑 核心修复：加回说话人身份用于重建（严格对齐论文 Eq.7 & Figure 1）
+        # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
         recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
-        wav_rec = self.dec(recon_with_spk.transpose(1, 2))  # [B, C, T] -> [B, T]
+        
+        # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
+        if wav_rec.shape[-1] != wav_main.shape[-1]:
+            wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
         if is_train:
             # ───────── 蒸馏路径：仅提取 s1, s2 用于说话人一致性约束 ─────────
-            mel_s1_4d = compute_mel(
-                wav_s1,
-                self.cfg['model']['n_mels'],
-                self.cfg['model']['sample_rate'],
-                self.cfg['model']['mel_hop_length'],
-            )  # [B, 1, F, T_mel]
-            mel_s2_4d = compute_mel(
-                wav_s2,
-                self.cfg['model']['n_mels'],
-                self.cfg['model']['sample_rate'],
-                self.cfg['model']['mel_hop_length'],
-            )  # [B, 1, F, T_mel]
-            spk1 = self.spk_enc(mel_s1_4d)  # [B, 256]
-            spk2 = self.spk_enc(mel_s2_4d)  # [B, 256]
+            mel_s1_4d = compute_mel(wav_s1, self.cfg['model']['n_mels'],
+                                    self.cfg['model']['sample_rate'], **mel_params)
+            mel_s2_4d = compute_mel(wav_s2, self.cfg['model']['n_mels'],
+                                    self.cfg['model']['sample_rate'], **mel_params)
+            spk1 = self.spk_enc(mel_s1_4d)  # [B, 512]
+            spk2 = self.spk_enc(mel_s2_4d)  # [B, 512]
             return wav_rec, spk1, spk2, q1, q2, com
         return wav_rec, spk_main, spk_main, q1, q2, com
 
@@ -140,15 +140,15 @@ class AnonSystem(pl.LightningModule):
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
         l_emo_chroma = self.l_chroma(q2, chroma_main) if chroma_main is not None else torch.tensor(0.0, device=wav.device)
         
-        # ───────── 3. 对抗损失（✅ 补全判别器步） ─────────
+        # ───────── 3. 对抗损失（补全判别器步） ─────────
         # 3.1 生成器步
         y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1))
         l_adv_g = self.l_adv(y_dg, y_dr, f_g, f_r, 'gen')
         
-        # ✅ 3.2 判别器步：必须 detach 切断生成器梯度，防止二次反向传播报错
+        # 3.2 判别器步：必须 detach 切断生成器梯度
         wav_rec_det = wav_rec.detach()
         y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1))
-        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')  # 判别器无需 fmap，传 [] 节省显存
+        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
         
         # ───────── 4. 总 Loss 与优化步进 ─────────
         total = (self.cfg['losses']['lambda_r'] * l_rec + 
@@ -168,7 +168,7 @@ class AnonSystem(pl.LightningModule):
         
         # 优化判别器
         opt_d.zero_grad()
-        self.manual_backward(l_adv_d)  # ✅ 现在 l_adv_d 已定义
+        self.manual_backward(l_adv_d)
         torch.nn.utils.clip_grad_norm_(opt_d.param_groups[0]['params'], max_norm=1.0)
         opt_d.step()
         
@@ -178,8 +178,8 @@ class AnonSystem(pl.LightningModule):
                 'train/loss': total,
                 'train/rec': l_rec,
                 'train/mrstft': l_mrstft,
-                'train/adv_g': l_adv_g,      # ✅ 拆分 adv_g
-                'train/adv_d': l_adv_d,      # ✅ 新增 adv_d 监控
+                'train/adv_g': l_adv_g,
+                'train/adv_d': l_adv_d,
                 'train/com': com,
                 'train/spk': l_spk,
                 'train/lin': l_lin,
@@ -192,7 +192,7 @@ class AnonSystem(pl.LightningModule):
 
     def validation_step(self, batch: dict, batch_idx: int):
         wav = batch['wav']  # [B, 1, T_max]
-        wav_rec, _, _, _, _, _ = self(wav)  # wav_rec: [B, T_max]
+        wav_rec, _, _, _, _, _ = self(wav)
         
         # ───────── 1. Mel 重建损失 ─────────
         mel_gt = self._compute_mel_3d(wav)
@@ -201,20 +201,22 @@ class AnonSystem(pl.LightningModule):
         l_rec = F.l1_loss(mel_rec[..., :T_min_mel], mel_gt[..., :T_min_mel]) + \
                 F.mse_loss(mel_rec[..., :T_min_mel], mel_gt[..., :T_min_mel])
         
-        # ───────── 2. MR-STFT 损失（时域多分辨率谱监督） ─────────
-        # 对齐波形长度，防止编解码 stride 导致的 1~2 帧偏差
-        T_min_wave = min(wav_rec.shape[-1], wav.shape[-1])
+        # ───────── 2. MR-STFT 损失（剔除 Padding 区域） ─────────
+        if 'lengths' in batch:
+            valid_len = int(batch['lengths'].min().item())
+        else:
+            valid_len = min(wav_rec.shape[-1], wav.shape[-1])
         l_mrstft = self.l_mrstft(
-            wav_rec[:, :T_min_wave],          # [B, T]
-            wav[:, 0, :T_min_wave]            # [B, T]
+            wav_rec[:, :valid_len],
+            wav[:, 0, :valid_len]
         )
         
         # ───────── 3. 日志记录 ─────────
         bs = self.cfg['training']['batch_size']
         self.log('val/rec', l_rec, prog_bar=True, batch_size=bs)
-        self.log('val/mrstft', l_mrstft, prog_bar=False, batch_size=bs)  # ✅ 新增监控
+        self.log('val/mrstft', l_mrstft, prog_bar=False, batch_size=bs)
         
-        # ───────── 4. 音频日志（仅 rank 0 且 batch_idx=0 时记录） ─────────
+        # ───────── 4. 音频日志 ─────────
         if self.global_rank == 0 and batch_idx == 0:
             sr = self.cfg['model']['sample_rate']
             step = self.global_step
@@ -224,36 +226,29 @@ class AnonSystem(pl.LightningModule):
             self.logger.experiment.add_audio('val/reconstructed', rec, step, sr)
 
     def on_train_epoch_end(self):
-        """手动优化模式下，需在 Epoch 结束时手动触发学习率调度器步进"""
         schedulers = self.lr_schedulers()
         if schedulers is not None:
             for scheduler in schedulers:
                 scheduler.step()
     
     def configure_optimizers(self):
-        # 生成器参数（排除判别器）
         g_p = [p for n, p in self.named_parameters() if 'disc' not in n]
         
-        # ✅ 生成器优化器：论文指定 β1=0.8, β2=0.99, weight_decay=1e-5
         opt_g = torch.optim.AdamW(
             g_p, 
             lr=self.cfg['training']['lr'], 
-            betas=self.cfg['training']['betas'],  # [0.8, 0.99]
-            weight_decay=self.cfg['training']['weight_decay']  # 1e-5
+            betas=self.cfg['training']['betas'],
+            weight_decay=self.cfg['training']['weight_decay']
         )
         
-        # ✅ 判别器优化器：标准动量 + 显式关闭权重衰减（防决策边界模糊）
         opt_d = torch.optim.AdamW(
             self.disc.parameters(), 
             lr=self.cfg['training']['lr'],
-            betas=(0.9, 0.999),     # 默认值，判别器无需低动量
-            weight_decay=0.0        # 🔑 关键：判别器必须关闭 weight_decay
+            betas=(0.9, 0.999),
+            weight_decay=0.0
         )
         
-        # ✅ 论文指定：学习率每 epoch 衰减 0.99 倍
         scheduler_g = torch.optim.lr_scheduler.ExponentialLR(opt_g, gamma=self.cfg['training']['gamma'])
         scheduler_d = torch.optim.lr_scheduler.ExponentialLR(opt_d, gamma=self.cfg['training']['gamma'])
         
-        # PyTorch Lightning 标准返回格式：优化器列表 + 调度器列表
-        # 默认在每 epoch 结束时自动调用 scheduler.step()
         return [opt_g, opt_d], [scheduler_g, scheduler_d]

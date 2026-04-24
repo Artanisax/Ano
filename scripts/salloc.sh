@@ -34,5 +34,5 @@ salloc \
 salloc \
     -p cpu \
     --qos cpu \
-    -c72 \
-    --mem=256G
+    -c130 \
+    --mem=384G

@@ -57,7 +57,7 @@ class AnonSystem(pl.LightningModule):
             raise RuntimeError("教师模型未加载。请确保 data.use_cache=False 或预缓存文件完整。")
         with torch.no_grad():
             feats = self.wavlm(wav_flat)  # [B*, T_wavlm, D_wavlm]
-            hop_length = self.cfg['model'].get('mel_hop_length', 320)
+            hop_length = self.cfg['model'].get('hop_length', 320)
             target = wav_flat.shape[-1] // hop_length
             if feats.shape[1] != target:
                 feats = F.interpolate(feats.transpose(1, 2), size=target, mode='linear', align_corners=False).transpose(1, 2)

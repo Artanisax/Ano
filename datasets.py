@@ -46,7 +46,7 @@ class VPDataset(Dataset):
                 self.entries.append({'wav': wav_path, 'spk': spk_id})
         
         self.T = cfg['training']['target_samples']
-        self.S = cfg['model']['mel_hop_length']
+        self.S = cfg['model']['hop_length']
         self.target_frames = self.T // self.S
         
         # ───────── 3. 最终统计（使用 tqdm.write 避免多进程输出交错） ─────────

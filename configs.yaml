@@ -4,9 +4,9 @@ random_seed: 42
 model:
   sample_rate: 16000
   n_mels: 80
-  mel_hop_length: 320
-  mel_win_length: 640
-  mel_n_fft: 1024
+  hop_length: 320
+  win_length: 1280
+  n_fft: 1280
   hidden_dim: 512
   lstm_layers: 2
   encoder_strides: [2, 4, 5, 8]
@@ -55,9 +55,9 @@ losses:
   lambda_e_chroma: 12.0
   lambda_mrstft: 2.0
   mrstft_resolutions:
-    - [1024, 160, 640]
-    - [512, 80, 320]
-    - [256, 40, 160]
+    - [640, 160, 640]
+    - [320, 80, 320]
+    - [160, 40, 160]
 
 preprocess:
   f0_min: 60.0
@@ -88,8 +88,8 @@ anonymization:
 # 全局默认 STFT 参数（供其他模块回退使用）
 stft:
   hop_length: 320
-  win_length: 640
-  n_fft: 1024
+  win_length: 1280
+  n_fft: 1280
 
 paths:
   train_dirs: [

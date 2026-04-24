@@ -174,7 +174,7 @@ def run_f0(cfg: dict, workers: int = 8):
     os.makedirs(f0_log_dir, exist_ok=True)
     
     f0_min, f0_max = cfg['preprocess']['f0_min'], cfg['preprocess']['f0_max']
-    hop_length = cfg['model'].get('mel_hop_length', 320)
+    hop_length = cfg['model'].get('hop_length', 320)
     
     for split in ["train", "val", "test"]:
         mf = os.path.join(cfg['paths']['manifest_dir'], f"{split}_manifest.txt")
@@ -243,9 +243,9 @@ def run_chroma(cfg: dict, workers: int = 8):
     chroma_dir = cfg['data'].get('chroma_dir')
     os.makedirs(chroma_dir, exist_ok=True)
     
-    n_fft = cfg['model'].get('mel_n_fft', 1024)
-    hop_length = cfg['model'].get('mel_hop_length', 320)
-    win_length = cfg['model'].get('mel_win_length', 640)
+    n_fft = cfg['model'].get('n_fft', 1280)
+    hop_length = cfg['model'].get('hop_length', 320)
+    win_length = cfg['model'].get('win_length', 1280)
     
     for split in ["train", "val", "test"]:
         mf = os.path.join(cfg['paths']['manifest_dir'], f"{split}_manifest.txt")
@@ -289,7 +289,7 @@ def run_kmeans(cfg: dict, gpu: int = 0):
     random.shuffle(paths)
     
     print("Filtering short utts...")
-    hop_length = cfg['model'].get('mel_hop_length', 320)
+    hop_length = cfg['model'].get('hop_length', 320)
     valid = [p for p in tqdm(paths, desc="Scan") if 
              os.path.exists(p) and torchaudio.info(p).num_frames / torchaudio.info(p).sample_rate >= 2.0]
     print(f"Loading WavLM...")
@@ -357,7 +357,7 @@ def run_tokens(cfg: dict, gpu: int = 0):
     tok_dir = cfg['data']['token_dir']
     os.makedirs(tok_dir, exist_ok=True)
     layer_idx = cfg['preprocess']['wavlm_layer_idx']
-    hop_length = cfg['model'].get('mel_hop_length', 320)
+    hop_length = cfg['model'].get('hop_length', 320)
     batch_size = 4
     
     for split in ["train", "val", "test"]:

@@ -21,7 +21,7 @@ model:
   bottleneck:
     num_quantizers: 8
     codebook_size: 1024
-    codebook_dim: 128
+    codebook_dim: 512
     decay: 0.99
     commitment_weight: 0.1
     use_cosine_sim: true

@@ -25,10 +25,6 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
         r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512]
         recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
         
-        # 🔧 防御性维度对齐
-        if recon.dim() == 4:
-            recon = recon.squeeze(2)
-        
         # ───────── 3. 重建输出：加回原始身份 ─────────
         recon_rec = recon + s_orig.unsqueeze(1)
         wav_rec = model.dec(recon_rec.transpose(1, 2))

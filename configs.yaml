@@ -66,6 +66,7 @@ preprocess:
   wavlm_layer_idx: 12
   kmeans_n_clusters: 1024
   kmeans_sample_frames: 4800000
+  kmeans_sample_frames: 6250000 # for 256 hop length
   kmeans_max_per_utt: 200
 
 data:

@@ -185,6 +185,7 @@ def run_f0(cfg: dict, workers: int = 8):
             res = list(tqdm(ex.map(_f0_worker, tasks), total=len(tasks), desc=f"F0-{split}"))
         print(f"[{split}] Done: {sum(res)}/{len(paths)}")
 
+# ✅ 核心修复：移除 log 与额外归一化，直接使用 librosa 默认输出
 def _chroma_worker(args: tuple) -> int:
     wav_path, chroma_dir, target_frames, n_fft, hop_length = args
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -201,9 +202,10 @@ def _chroma_worker(args: tuple) -> int:
             target_frames = len(wav_np) // hop_length
         if target_frames < 2: return 0
 
+        # ✅ librosa 默认已按帧归一化（最大值为1），直接保留原始能量比
         chroma = librosa.feature.chroma_stft(
             y=wav_np, sr=16000, n_fft=n_fft, hop_length=hop_length, n_chroma=24
-        )
+        )  # [24, T_chroma]
 
         if np.any(np.isnan(chroma)):
             print(f"[Chroma-WARN] 提取含 NaN: {wav_path}")
@@ -211,20 +213,21 @@ def _chroma_worker(args: tuple) -> int:
             print(f"[Chroma-WARN] 提取含 Inf: {wav_path}")
 
         chroma = np.nan_to_num(chroma, nan=0.0, posinf=1.0, neginf=0.0)
-        chroma_log = np.log(chroma + 1e-5)
-        chroma_norm = torch.nn.functional.normalize(
-            torch.tensor(chroma_log), dim=0, p=2
-        ).numpy()
 
-        # 🔑 关键修复：使用纯 NumPy 对齐帧数
-        if chroma_norm.shape[1] != target_frames:
-            chroma_norm = _align_frames(chroma_norm.T, target_frames).T  # [12, T] -> [T, 12] -> align -> [T_new, 12] -> [12, T_new]
+        # ✅ 沿时间轴 (axis=1) 插值，避免维度错位
+        if chroma.shape[1] != target_frames:
+            x_old = np.linspace(0, 1, chroma.shape[1], endpoint=True)
+            x_new = np.linspace(0, 1, target_frames, endpoint=True)
+            interp_func = interp1d(x_old, chroma, kind='linear', axis=1,
+                                   bounds_error=False, fill_value="extrapolate")
+            chroma = interp_func(x_new)
 
-        if np.any(np.isnan(chroma_norm)) or np.any(np.isinf(chroma_norm)):
+        if np.any(np.isnan(chroma)) or np.any(np.isinf(chroma)):
             print(f"[Chroma-FIX] 最终清洗: {wav_path}")
-            chroma_norm = np.nan_to_num(chroma_norm, nan=0.0, posinf=1.0, neginf=0.0)
+            chroma = np.nan_to_num(chroma, nan=0.0, posinf=1.0, neginf=0.0)
         
-        chroma_final = chroma_norm.T.astype(np.float32)
+        # 转置为 [T, 24] 便于后续加载
+        chroma_final = chroma.T.astype(np.float32)
         os.makedirs(chroma_dir, exist_ok=True)
         np.save(out, chroma_final)
         return 1
@@ -282,7 +285,8 @@ def run_kmeans(cfg: dict, gpu: int = 0):
     
     print("Filtering short utts...")
     hop_length = cfg['model'].get('mel_hop_length', 256)
-    valid = [p for p in tqdm(paths, desc="Scan") if os.path.exists(p) and torchaudio.info(p).num_frames // hop_length >= 100]
+    valid = [p for p in tqdm(paths, desc="Scan") if 
+             os.path.exists(p) and torchaudio.info(p).num_frames / torchaudio.info(p).sample_rate >= 2.0]
     print(f"Loading WavLM...")
     ext = AutoFeatureExtractor.from_pretrained(cfg['preprocess']['wavlm_model'])
     model = WavLMModel.from_pretrained(cfg['preprocess']['wavlm_model']).to(device).eval()

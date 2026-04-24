@@ -94,6 +94,7 @@ class AnonSystem(pl.LightningModule):
         
         # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
         recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
+        wav_rec = self.dec(recon_with_spk.transpose(1, 2))  # [B, C, T] -> [B, T]
         
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:

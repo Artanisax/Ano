@@ -57,7 +57,7 @@ class AnonSystem(pl.LightningModule):
             raise RuntimeError("教师模型未加载。请确保 data.use_cache=False 或预缓存文件完整。")
         with torch.no_grad():
             feats = self.wavlm(wav_flat)  # [B*, T_wavlm, D_wavlm]
-            hop_length = self.cfg['model'].get('mel_hop_length', 256)
+            hop_length = self.cfg['model'].get('mel_hop_length', 320)
             target = wav_flat.shape[-1] // hop_length
             if feats.shape[1] != target:
                 feats = F.interpolate(feats.transpose(1, 2), size=target, mode='linear', align_corners=False).transpose(1, 2)
@@ -86,7 +86,7 @@ class AnonSystem(pl.LightningModule):
         mel_main_4d = compute_mel(wav_main, self.cfg['model']['n_mels'], 
                                   self.cfg['model']['sample_rate'], **mel_params)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
-        spk_main = self.spk_enc(mel_main_4d)            # [B, 256]
+        spk_main = self.spk_enc(mel_main_4d)            # [B, 512]
         
         # ✅ 串行解耦：减去原始说话人身份（论文 §3.1, Figure 1）
         r1 = feat_main - spk_main.unsqueeze(1)          # [B, T_feat, 512]
@@ -105,8 +105,8 @@ class AnonSystem(pl.LightningModule):
                                     self.cfg['model']['sample_rate'], **mel_params)
             mel_s2_4d = compute_mel(wav_s2, self.cfg['model']['n_mels'],
                                     self.cfg['model']['sample_rate'], **mel_params)
-            spk1 = self.spk_enc(mel_s1_4d)  # [B, 256]
-            spk2 = self.spk_enc(mel_s2_4d)  # [B, 256]
+            spk1 = self.spk_enc(mel_s1_4d)  # [B, 512]
+            spk2 = self.spk_enc(mel_s2_4d)  # [B, 512]
             return wav_rec, spk1, spk2, q1, q2, com
         return wav_rec, spk_main, spk_main, q1, q2, com
 

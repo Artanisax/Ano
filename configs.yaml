@@ -4,8 +4,8 @@ random_seed: 42
 model:
   sample_rate: 16000
   n_mels: 80
-  mel_hop_length: 256
-  mel_win_length: 1024  # ✅ 新增：4 * hop_length，75% 重叠
+  mel_hop_length: 320
+  mel_win_length: 640
   mel_n_fft: 1024
   hidden_dim: 512
   lstm_layers: 2
@@ -55,9 +55,9 @@ losses:
   lambda_e_chroma: 8.0
   lambda_mrstft: 2.0
   mrstft_resolutions:
-    - [512, 128, 512]
-    - [256, 64, 256]
-    - [128, 32, 128]
+    - [1024, 160, 640]
+    - [512, 80, 320]
+    - [256, 40, 160]
 
 preprocess:
   f0_min: 60.0
@@ -65,7 +65,7 @@ preprocess:
   wavlm_model: "microsoft/wavlm-large"
   wavlm_layer_idx: 12
   kmeans_n_clusters: 1024
-  kmeans_sample_frames: 4800000
+  kmeans_sample_frames: 4800000 # for 320 hop length
   kmeans_sample_frames: 6250000 # for 256 hop length
   kmeans_max_per_utt: 200
 
@@ -87,8 +87,8 @@ anonymization:
 
 # 全局默认 STFT 参数（供其他模块回退使用）
 stft:
-  hop_length: 256
-  win_length: 1024
+  hop_length: 320
+  win_length: 640
   n_fft: 1024
 
 paths:

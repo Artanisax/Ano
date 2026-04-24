@@ -91,7 +91,7 @@ def main():
         wav = load_audio(str(input_path)).to(args.device).unsqueeze(0)
         
         # 🔧 长度保护：补齐至 hop_length 倍数，防止边界伪影
-        hop_length = cfg['model'].get('mel_hop_length', 256)
+        hop_length = cfg['model'].get('mel_hop_length', 320)
         orig_len = wav.shape[-1]
         pad_len = (hop_length - orig_len % hop_length) % hop_length
         if pad_len > 0:
@@ -120,7 +120,7 @@ def main():
             
         print(f"📁 发现 {len(audio_files)} 个音频文件，开始批量处理...\n")
         success, fail = 0, 0
-        hop_length = cfg['model'].get('mel_hop_length', 256)
+        hop_length = cfg['model'].get('mel_hop_length', 320)
         
         for f_path in tqdm(audio_files, desc="Processing", unit="file"):
             try:

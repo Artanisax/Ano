@@ -39,7 +39,7 @@ def load_audio(path: str, sr: int = 16000) -> torch.Tensor:
     return wav
 
 def compute_mel(wav: torch.Tensor, n_mels: int = 80, sr: int = 16000, 
-                hop: int = 256, win: int = 1024, n_fft: int = 1024) -> torch.Tensor:
+                hop: int = 320, win: int = 640, n_fft: int = 1024) -> torch.Tensor:
     mel_transform = torchaudio.transforms.MelSpectrogram(
         sample_rate=sr, n_mels=n_mels, n_fft=n_fft,
         win_length=win, hop_length=hop,
@@ -62,15 +62,14 @@ def get_stft_params(cfg: dict, prefix: str = 'mel') -> dict:
         return model_cfg.get(f'{prefix}_{key}', global_cfg.get(key, default))
     
     return {
-        'hop': _get('hop_length', 256),
-        'win': _get('win_length', 1024),
+        'hop': _get('hop_length', 320),
+        'win': _get('win_length', 640),
         'n_fft': _get('n_fft', 1024),
     }
 
 def extract_f0_aligned(wav_np: np.ndarray, sr: int = 16000, f0_min: float = 60.0, 
                        f0_max: float = 600.0, target_frames: int = None, 
-                       hop_length: int = 256) -> torch.Tensor:
-    return NotImplementedError("F0 not cached!")
+                       hop_length: int = 320) -> torch.Tensor:
     """通用 F0 提取函数，hop_length 可配置"""
     wav_np = wav_np.squeeze().astype(np.float64)
     

@@ -73,11 +73,10 @@ data:
   use_cache: true
   # f0_dir: "data/processed/f0_abs"
   f0_dir: "data/processed/f0_log"
-  # chroma_dir: "data/processed/chroma"
-  chroma_dir: "data/processed/chroma_fixed"
+  chroma_dir: "data/processed/chroma"
   token_dir: "data/processed/tokens"
-  f0_abs_dir: "data/processed/f0_abs_fixed"
-  f0_log_dir: "data/processed/f0_log_fixed"
+  f0_abs_dir: "data/processed/f0_abs"
+  f0_log_dir: "data/processed/f0_log"
 
 anonymization:
   vctk_pool_path: "data/vctk_speaker_vectors.pt"

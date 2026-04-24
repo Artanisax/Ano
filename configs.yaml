@@ -65,18 +65,19 @@ preprocess:
   wavlm_model: "microsoft/wavlm-large"
   wavlm_layer_idx: 12
   kmeans_n_clusters: 1024
-  kmeans_sample_frames: 4800000 # for 320 hop length
-  kmeans_sample_frames: 6250000 # for 256 hop length
+  kmeans_sample_frames: 5000000 # for 320 hop length
+  # kmeans_sample_frames: 6250000 # for 256 hop length
   kmeans_max_per_utt: 200
 
 data:
   use_cache: true
   # f0_dir: "data/processed/f0_abs"
   f0_dir: "data/processed/f0_log"
-  chroma_dir: "data/processed/chroma"
+  # chroma_dir: "data/processed/chroma"
+  chroma_dir: "data/processed/chroma_fixed"
   token_dir: "data/processed/tokens"
-  f0_abs_dir: "data/processed/f0_abs"
-  f0_log_dir: "data/processed/f0_log"
+  f0_abs_dir: "data/processed/f0_abs_fixed"
+  f0_log_dir: "data/processed/f0_log_fixed"
 
 anonymization:
   vctk_pool_path: "data/vctk_speaker_vectors.pt"

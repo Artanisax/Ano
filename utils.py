@@ -70,7 +70,7 @@ def get_stft_params(cfg: dict, prefix: str = 'mel') -> dict:
 def extract_f0_aligned(wav_np: np.ndarray, sr: int = 16000, f0_min: float = 60.0, 
                        f0_max: float = 600.0, target_frames: int = None, 
                        hop_length: int = 320) -> torch.Tensor:
-    """通用 F0 提取函数，hop_length 可配置"""
+    """通用 F0 提取函数，返回 log-F0（与缓存 f0_log 对齐）"""
     wav_np = wav_np.squeeze().astype(np.float64)
     
     frame_period = hop_length / sr * 1000.0
@@ -86,28 +86,47 @@ def extract_f0_aligned(wav_np: np.ndarray, sr: int = 16000, f0_min: float = 60.0
         
     voiced = f0 > 0.0
     f0_abs = np.zeros_like(f0)
+    f0_log = np.zeros_like(f0)
+    log_min, log_max = np.log(f0_min), np.log(f0_max)
     
     if voiced.any():
         f0_abs[voiced] = f0[voiced]
+        f0_log[voiced] = np.log(f0[voiced])
         if not voiced.all():
             t_valid = np.where(voiced)[0]
             if len(t_valid) >= 2:
                 with warnings.catch_warnings(record=True) as w_list:
                     warnings.simplefilter("always")
-                    interp_func = interp1d(t_valid, f0_abs[voiced], kind='linear',
-                                           bounds_error=False, fill_value="extrapolate")
-                    f0_abs = interp_func(np.arange(len(f0_abs)))
+                    interp_func_abs = interp1d(
+                        t_valid,
+                        f0_abs[voiced],
+                        kind='linear',
+                        bounds_error=False,
+                        fill_value="extrapolate",
+                    )
+                    f0_abs = interp_func_abs(np.arange(len(f0_abs)))
+                    interp_func_log = interp1d(
+                        t_valid,
+                        f0_log[voiced],
+                        kind='linear',
+                        bounds_error=False,
+                        fill_value="extrapolate",
+                    )
+                    f0_log = interp_func_log(np.arange(len(f0_log)))
                     if w_list and any(issubclass(w.category, RuntimeWarning) for w in w_list):
                         print(f"[F0-Warn] 插值警告 (dynamic)")
             else:
                 f0_abs[:] = f0_abs[t_valid[0]] if len(t_valid) == 1 else f0_min
+                f0_log[:] = f0_log[t_valid[0]] if len(t_valid) == 1 else log_min
         f0_abs = np.clip(f0_abs, f0_min, f0_max)
+        f0_log = np.clip(f0_log, log_min, log_max)
     else:
         f0_abs[:] = f0_min
+        f0_log[:] = log_min
             
-    f0_tensor = torch.tensor(f0_abs, dtype=torch.float32)
+    f0_tensor = torch.tensor(f0_log, dtype=torch.float32)
     if target_frames is not None and f0_tensor.shape[0] != target_frames:
-        f0_tensor = np.nan_to_num(f0_tensor.numpy(), nan=f0_min, posinf=f0_max, neginf=f0_min)
+        f0_tensor = np.nan_to_num(f0_tensor.numpy(), nan=log_min, posinf=log_max, neginf=log_min)
         f0_tensor = torch.tensor(f0_tensor)
         f0_tensor = F.interpolate(
             f0_tensor.unsqueeze(0).unsqueeze(0), 

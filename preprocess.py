@@ -85,7 +85,9 @@ def _f0_worker(args: tuple) -> int:
         # ───────── 1. 音频加载与重采样 ─────────
         wav, sr = torchaudio.load(wav_path)
         if wav.dim() > 1: wav = wav.mean(0, keepdim=True)
-        if sr != 16000: wav = torchaudio.functional.resample(wav, sr, 16000)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+            sr = 16000
         wav_np = wav.squeeze().numpy().astype(np.float64)
 
         target = len(wav_np) // hop_length
@@ -187,7 +189,7 @@ def run_f0(cfg: dict, workers: int = 8):
 
 # ✅ 核心修复：移除 log 与额外归一化，直接使用 librosa 默认输出
 def _chroma_worker(args: tuple) -> int:
-    wav_path, chroma_dir, target_frames, n_fft, hop_length = args
+    wav_path, chroma_dir, target_frames, n_fft, hop_length, win_length = args
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     uid = os.path.basename(wav_path).split('.')[0]
     out = os.path.join(chroma_dir, f"{uid}.npy")
@@ -195,7 +197,9 @@ def _chroma_worker(args: tuple) -> int:
     try:
         wav, sr = torchaudio.load(wav_path)
         if wav.dim() > 1: wav = wav.mean(0, keepdim=True)
-        if sr != 16000: wav = torchaudio.functional.resample(wav, sr, 16000)
+        if sr != 16000:
+            wav = torchaudio.functional.resample(wav, sr, 16000)
+            sr = 16000
         wav_np = wav.squeeze().numpy().astype(np.float32)
 
         if target_frames is None:
@@ -204,7 +208,7 @@ def _chroma_worker(args: tuple) -> int:
 
         # ✅ librosa 默认已按帧归一化（最大值为1），直接保留原始能量比
         chroma = librosa.feature.chroma_stft(
-            y=wav_np, sr=16000, n_fft=n_fft, hop_length=hop_length, n_chroma=24
+            y=wav_np, sr=sr, n_fft=n_fft, hop_length=hop_length, win_length=win_length, n_chroma=24
         )  # [24, T_chroma]
 
         if np.any(np.isnan(chroma)):
@@ -241,6 +245,7 @@ def run_chroma(cfg: dict, workers: int = 8):
     
     n_fft = cfg['model'].get('mel_n_fft', 1024)
     hop_length = cfg['model'].get('mel_hop_length', 320)
+    win_length = cfg['model'].get('mel_win_length', 640)
     
     for split in ["train", "val", "test"]:
         mf = os.path.join(cfg['paths']['manifest_dir'], f"{split}_manifest.txt")
@@ -256,7 +261,7 @@ def run_chroma(cfg: dict, workers: int = 8):
                 info = torchaudio.info(p)
                 target = info.num_frames // hop_length
                 if target >= 2:
-                    tasks.append((p, chroma_dir, target, n_fft, hop_length))
+                    tasks.append((p, chroma_dir, target, n_fft, hop_length, win_length))
             except:
                 continue
         
@@ -303,11 +308,13 @@ def run_kmeans(cfg: dict, gpu: int = 0):
             for p in valid[i:i+batch_size]:
                 w, sr = torchaudio.load(p)
                 if w.dim() > 1: w = w.mean(0, keepdim=True)
-                if sr != 16000: w = torchaudio.functional.resample(w, sr, 16000)
+                if sr != 16000:
+                    w = torchaudio.functional.resample(w, sr, 16000)
+                    sr = 16000
                 batch.append(w.squeeze())
             if not batch: continue
             pad = torch.nn.utils.rnn.pad_sequence(batch, batch_first=True).to(device)
-            inp = ext(pad.cpu().numpy(), sampling_rate=16000, return_tensors="pt", padding=True).to(device)
+            inp = ext(pad.cpu().numpy(), sampling_rate=sr, return_tensors="pt", padding=True).to(device)
             out = model(**inp, output_hidden_states=True).hidden_states[layer_idx]
             for b in range(len(batch)):
                 vl = min(out.shape[1], int(np.ceil(len(batch[b]) / hop_length)))

@@ -95,11 +95,6 @@ class AnonSystem(pl.LightningModule):
         # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
         recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
         
-        # 🔧 防御性维度对齐：处理 Bottleneck 可能的 4D 输出 [B, T, 1, C]
-        if recon_with_spk.dim() == 4:
-            recon_with_spk = recon_with_spk.squeeze(2)  # [B, T, 1, C] -> [B, T, C]
-        wav_rec = self.dec(recon_with_spk.transpose(1, 2))  # [B, C, T] -> [B, T]
-        
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:
             wav_rec = wav_rec[..., :wav_main.shape[-1]]

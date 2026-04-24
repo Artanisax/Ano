@@ -157,7 +157,7 @@ class AnonSystem(pl.LightningModule):
                  self.cfg['losses']['lambda_c'] * com + 
                  self.cfg['losses']['lambda_s'] * l_spk +
                  self.cfg['losses']['lambda_l'] * l_lin + 
-                 self.cfg['losses']['lambda_e'] * l_emo_f0 +
+                 self.cfg['losses']['lambda_e_f0'] * l_emo_f0 +
                  self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
                  self.cfg['losses']['lambda_mrstft'] * l_mrstft)
                  

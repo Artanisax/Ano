@@ -52,7 +52,7 @@ losses:
   lambda_s: 1.0
   lambda_l: 1.0
   lambda_e_f0: 1.0
-  lambda_e_chroma: 8.0
+  lambda_e_chroma: 12.0
   lambda_mrstft: 2.0
   mrstft_resolutions:
     - [1024, 160, 640]

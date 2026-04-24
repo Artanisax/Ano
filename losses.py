@@ -35,8 +35,6 @@ class ChromaDistillLoss(nn.Module):
     def __init__(self, dim: int, n_chroma: int = 24):
         super().__init__()
         self.proj = nn.Linear(dim, n_chroma)
-        with torch.no_grad():
-            self.proj.bias.zero_()
     
     def forward(self, q2: torch.Tensor, chroma: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2)

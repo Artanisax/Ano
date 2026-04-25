@@ -401,14 +401,15 @@ class DiscriminatorP(nn.Module):
         super().__init__()
         self.period = period
         nf = nn.utils.spectral_norm if use_sn else nn.utils.weight_norm
+        ch = [32, 128, 512, 1024, 1024]
         self.convs = nn.ModuleList([
-            nf(nn.Conv2d(1, 32, (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
-            nf(nn.Conv2d(32, 128, (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
-            nf(nn.Conv2d(128, 512, (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
-            nf(nn.Conv2d(512, 1024, (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
-            nf(nn.Conv2d(1024, 1024, (kernel, 1), 1, padding=(2, 0))),
+            nf(nn.Conv2d(1, ch[0], (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
+            nf(nn.Conv2d(ch[0], ch[1], (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
+            nf(nn.Conv2d(ch[1], ch[2], (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
+            nf(nn.Conv2d(ch[2], ch[3], (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
+            nf(nn.Conv2d(ch[3], ch[4], (kernel, 1), 1, padding=(2, 0))),
         ])
-        self.conv_post = nf(nn.Conv2d(1024, 1, kernel_size=(3, 1), stride=1, padding=(1, 0)))
+        self.conv_post = nf(nn.Conv2d(ch[4], 1, kernel_size=(3, 1), stride=1, padding=(1, 0)))
     
     def forward(self, x: torch.Tensor):
         # x: [B, 1, T] → reshape: [B, 1, T//period, period] → conv2d → flatten
@@ -498,9 +499,9 @@ class Discriminator(nn.Module):
         self.msd = MultiScaleDiscriminator()
         self.mstftd = MultiScaleSTFTDiscriminator(
             filters=32,
-            n_ffts=[1024, 2048, 512, 256, 128],
-            hop_lengths=[256, 512, 128, 64, 32],
-            win_lengths=[1024, 2048, 512, 256, 128],
+            n_ffts=[2048, 1024, 512, 256, 128],
+            hop_lengths=[512, 256, 128, 64, 32],
+            win_lengths=[2048, 1024, 512, 256, 128],
         )
 
     def forward(self, y: torch.Tensor, y_hat: torch.Tensor):

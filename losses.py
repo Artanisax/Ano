@@ -87,19 +87,17 @@ class MultiResolutionSTFTLoss(nn.Module):
 class AdvLoss(nn.Module):
     def forward(self, disc_fake: list, disc_real: list, fmap_fake: list, fmap_real: list, mode: str = 'gen') -> torch.Tensor:
         if mode == 'gen':
-            l_adv = torch.stack([torch.mean((1 - d) ** 2) for d in disc_fake]).mean()
+            # HiFi-GAN style balancing: sum over discriminators instead of averaging.
+            l_adv = sum(torch.mean((1 - d) ** 2) for d in disc_fake)
             fm_loss = 0.0
-            count = 0
             for fr_list, fg_list in zip(fmap_real, fmap_fake):
                 for fr, fg in zip(fr_list, fg_list):
                     min_t = min(fr.shape[2], fg.shape[2])
                     fr_s = fr[:, :, :min_t, ...]
                     fg_s = fg[:, :, :min_t, ...]
                     fm_loss += torch.mean(torch.abs(fr_s - fg_s))
-                    count += 1
-            l_fm = fm_loss / count if count > 0 else 0.0
-            return l_adv + 2.0 * l_fm
+            return l_adv + 2.0 * fm_loss
         else:
-            l_real = torch.stack([torch.mean((1 - d) ** 2) for d in disc_real]).mean()
-            l_fake = torch.stack([torch.mean(d ** 2) for d in disc_fake]).mean()
+            l_real = sum(torch.mean((1 - d) ** 2) for d in disc_real)
+            l_fake = sum(torch.mean(d ** 2) for d in disc_fake)
             return l_real + l_fake

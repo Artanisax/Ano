@@ -6,15 +6,18 @@ from vector_quantize_pytorch import ResidualVQ
 from transformers import WavLMModel
 
 def get_padding(k: int, d: int = 1) -> int:
-    return int((k * d - d) / 2)
+    return (k * d - d) // 2
 
 LRELU_SLOPE = 0.1
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = 5):
+    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None):
         super().__init__()
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel, stride=stride, padding=get_padding(kernel))
-        self.res = nn.Conv1d(in_ch, out_ch, 1, stride=stride) if stride > 1 else nn.Identity()
+        if kernel is None:
+            kernel = stride * 2 + stride % 2
+        padding = (kernel - stride) // 2
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+        self.res = nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
         self.norm = nn.LayerNorm(out_ch)
         self.act = nn.GELU()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -25,9 +28,12 @@ class SpeechEncoder(nn.Module):
     def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
         super().__init__()
         ch = [64, 128, 256, hidden]
-        self.convs = nn.ModuleList([ConvBlock(1 if i == 0 else ch[i-1], c, s) for i, (c, s) in enumerate(zip(ch, strides))])
+        self.convs = nn.ModuleList([
+            ConvBlock(1 if i == 0 else ch[i-1], c, stride=s) 
+            for i, (c, s) in enumerate(zip(ch, strides))
+        ])
         self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
-        self.proj = nn.Conv1d(hidden * 2, hidden, 7, padding=3)
+        self.proj = nn.Conv1d(hidden * 2, hidden, stride=1, kernel_size=7, padding=3)
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         # wav: [B, 1, T] → convs: [B, hidden, T_feat] → lstm: [B, T_feat, hidden*2] → proj: [B, T_feat, hidden]
         x = wav  # [B, 1, T]
@@ -41,8 +47,13 @@ class SpeakerEncoder(nn.Module):
         K = len(cfg['ref_enc_filters'])
         filters = [1] + cfg['ref_enc_filters']
         self.convs = nn.ModuleList([
-            nn.Conv2d(filters[i], filters[i+1], (cfg['ref_enc_size'], cfg['ref_enc_size']),
-                      stride=(cfg['ref_enc_strides'][i], cfg['ref_enc_strides'][i]), padding=cfg['ref_enc_pad'])
+            nn.Conv2d(
+                in_channels=filters[i], 
+                out_channels=filters[i+1], 
+                kernel_size=(cfg['ref_enc_size'], cfg['ref_enc_size']),
+                stride=(cfg['ref_enc_strides'][i], cfg['ref_enc_strides'][i]), 
+                padding=cfg['ref_enc_pad']
+            )
             for i in range(K)
         ])
         self.bns = nn.ModuleList([nn.BatchNorm2d(f) for f in filters[1:]])
@@ -113,14 +124,20 @@ class Decoder(nn.Module):
         super().__init__()
         t_strides = list(reversed(strides))
         ch = [hidden, 256, 128, 64, 1]
-        self.blocks = nn.ModuleList([
-            nn.ConvTranspose1d(ch[i], ch[i+1], 5, s, padding=get_padding(5))
-            for i, s in enumerate(t_strides)
-        ])
+        
+        self.blocks = nn.ModuleList()
+        for i, s in enumerate(t_strides):
+            k = s * 2 + s % 2
+            p = (k - s) // 2
+            self.blocks.append(
+                nn.ConvTranspose1d(ch[i], ch[i+1], kernel_size=k, stride=s, padding=p)
+            )
         self.act = nn.GELU()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, T_feat, hidden] → transpose: [B, hidden, T_feat] → convT: [B, 1, T]
-        for b in self.blocks: x = self.act(b(x))  # [B, C_i, T_i]
+        for b in self.blocks: 
+            x = self.act(b(x))
         return x.squeeze(1)  # [B, T]
 
 class WavLMExtractor(nn.Module):
@@ -149,7 +166,7 @@ class DiscriminatorP(nn.Module):
             nf(nn.Conv2d(512, 1024, (kernel, 1), (stride, 1), padding=(get_padding(kernel), 0))),
             nf(nn.Conv2d(1024, 1024, (kernel, 1), 1, padding=(2, 0))),
         ])
-        self.conv_post = nf(nn.Conv2d(1024, 1, (3, 1), 1, padding=(1, 0)))
+        self.conv_post = nf(nn.Conv2d(1024, 1, kernel_size=(3, 1), stride=1, padding=(1, 0)))
     
     def forward(self, x: torch.Tensor):
         # x: [B, 1, T] → reshape: [B, 1, T//period, period] → conv2d → flatten
@@ -166,15 +183,15 @@ class DiscriminatorS(nn.Module):
         super().__init__()
         nf = nn.utils.spectral_norm if use_sn else nn.utils.weight_norm
         self.convs = nn.ModuleList([
-            nf(nn.Conv1d(1, 128, 15, 1, padding=7)),
-            nf(nn.Conv1d(128, 128, 41, 4, groups=4, padding=20)),
-            nf(nn.Conv1d(128, 256, 41, 4, groups=16, padding=20)),
-            nf(nn.Conv1d(256, 512, 41, 4, groups=16, padding=20)),
-            nf(nn.Conv1d(512, 1024, 41, 4, groups=16, padding=20)),
-            nf(nn.Conv1d(1024, 1024, 41, 2, groups=16, padding=20)),
-            nf(nn.Conv1d(1024, 1024, 5, 1, padding=2)),
+            nf(nn.Conv1d(1, 128, kernel_size=15, stride=1, padding=7)),
+            nf(nn.Conv1d(128, 128, kernel_size=41, stride=4, groups=4, padding=20)),
+            nf(nn.Conv1d(128, 256, kernel_size=41, stride=4, groups=16, padding=20)),
+            nf(nn.Conv1d(256, 512, kernel_size=41, stride=4, groups=16, padding=20)),
+            nf(nn.Conv1d(512, 1024, kernel_size=41, stride=4, groups=16, padding=20)),
+            nf(nn.Conv1d(1024, 1024, kernel_size=41, stride=2, groups=16, padding=20)),
+            nf(nn.Conv1d(1024, 1024, kernel_size=5, stride=1, padding=2)),
         ])
-        self.conv_post = nf(nn.Conv1d(1024, 1, 3, 1, padding=1))
+        self.conv_post = nf(nn.Conv1d(1024, 1, kernel_size=3, stride=1, padding=1))
     
     def forward(self, x: torch.Tensor):
         # x: [B, 1, T] → conv1d chain → flatten

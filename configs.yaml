@@ -27,13 +27,13 @@ model:
     threshold_ema_dead_code: 2.0
 
 training:
-  batch_size: 16
+  batch_size: 20
   max_steps: 500000
   max_epochs: 10
   lr: 1.0e-4
   gamma: 0.9
   betas: [0.8, 0.999]
-  weight_decay: 1.0e-5
+  weight_decay: 1.25e-5
   num_workers: 16
   precision: "bf16"
   target_samples: 96000
@@ -56,6 +56,11 @@ losses:
     - [1024, 160, 640]
     - [512, 80, 320]
     - [256, 40, 160]
+
+discriminator:
+  enable_mpd: true
+  enable_msd: true
+  enable_mstft: true
 
 preprocess:
   f0_min: 60.0

@@ -510,15 +510,26 @@ class MultiScaleDiscriminator(nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, disc_cfg: dict = None):
         super().__init__()
-        self.mpd = MultiPeriodDiscriminator()
-        self.msd = MultiScaleDiscriminator()
-        self.mstftd = MultiScaleSTFTDiscriminator(
-            filters=32,
-            n_ffts=[2048, 1024, 512, 256, 128],
-            hop_lengths=[512, 256, 128, 64, 32],
-            win_lengths=[2048, 1024, 512, 256, 128],
+        disc_cfg = disc_cfg or {}
+        self.enable_mpd = disc_cfg.get("enable_mpd", True)
+        self.enable_msd = disc_cfg.get("enable_msd", True)
+        self.enable_mstft = disc_cfg.get("enable_mstft", True)
+
+        if not (self.enable_mpd or self.enable_msd or self.enable_mstft):
+            raise ValueError("At least one discriminator branch must be enabled.")
+
+        self.mpd = MultiPeriodDiscriminator() if self.enable_mpd else None
+        self.msd = MultiScaleDiscriminator() if self.enable_msd else None
+        self.mstftd = (
+            MultiScaleSTFTDiscriminator(
+                filters=32,
+                n_ffts=[2048, 1024, 512, 256, 128],
+                hop_lengths=[512, 256, 128, 64, 32],
+                win_lengths=[2048, 1024, 512, 256, 128],
+            )
+            if self.enable_mstft else None
         )
 
     def forward(self, y: torch.Tensor, y_hat: torch.Tensor, return_fmaps: bool = True):
@@ -530,26 +541,29 @@ class Discriminator(nn.Module):
 
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
 
-        y_mpd_r, y_mpd_g, fmap_mpd_r, fmap_mpd_g = self.mpd(y, y_hat, return_fmaps=return_fmaps)
-        y_d_rs.extend(y_mpd_r)
-        y_d_gs.extend(y_mpd_g)
-        if return_fmaps:
-            fmap_rs.extend(fmap_mpd_r)
-            fmap_gs.extend(fmap_mpd_g)
+        if self.mpd is not None:
+            y_mpd_r, y_mpd_g, fmap_mpd_r, fmap_mpd_g = self.mpd(y, y_hat, return_fmaps=return_fmaps)
+            y_d_rs.extend(y_mpd_r)
+            y_d_gs.extend(y_mpd_g)
+            if return_fmaps:
+                fmap_rs.extend(fmap_mpd_r)
+                fmap_gs.extend(fmap_mpd_g)
 
-        y_msd_r, y_msd_g, fmap_msd_r, fmap_msd_g = self.msd(y, y_hat, return_fmaps=return_fmaps)
-        y_d_rs.extend(y_msd_r)
-        y_d_gs.extend(y_msd_g)
-        if return_fmaps:
-            fmap_rs.extend(fmap_msd_r)
-            fmap_gs.extend(fmap_msd_g)
+        if self.msd is not None:
+            y_msd_r, y_msd_g, fmap_msd_r, fmap_msd_g = self.msd(y, y_hat, return_fmaps=return_fmaps)
+            y_d_rs.extend(y_msd_r)
+            y_d_gs.extend(y_msd_g)
+            if return_fmaps:
+                fmap_rs.extend(fmap_msd_r)
+                fmap_gs.extend(fmap_msd_g)
 
-        y_stft_r, fmap_stft_r = self.mstftd(y, return_fmaps=return_fmaps)
-        y_stft_g, fmap_stft_g = self.mstftd(y_hat, return_fmaps=return_fmaps)
-        y_d_rs.extend(y_stft_r)
-        y_d_gs.extend(y_stft_g)
-        if return_fmaps:
-            fmap_rs.extend(fmap_stft_r)
-            fmap_gs.extend(fmap_stft_g)
+        if self.mstftd is not None:
+            y_stft_r, fmap_stft_r = self.mstftd(y, return_fmaps=return_fmaps)
+            y_stft_g, fmap_stft_g = self.mstftd(y_hat, return_fmaps=return_fmaps)
+            y_d_rs.extend(y_stft_r)
+            y_d_gs.extend(y_stft_g)
+            if return_fmaps:
+                fmap_rs.extend(fmap_stft_r)
+                fmap_gs.extend(fmap_stft_g)
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs

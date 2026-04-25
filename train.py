@@ -12,6 +12,18 @@ from utils import setup_seed
 
 torch.backends.nnpack.enabled = False
 
+def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
+    items = {}
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.update(_flatten_dict(v, new_key, sep=sep))
+        elif isinstance(v, (list, tuple)):
+            items[new_key] = str(v)
+        else:
+            items[new_key] = v
+    return items
+
 def main():
     with open("configs.yaml") as f: cfg = yaml.safe_load(f)
     setup_seed(cfg.get('random_seed', 42))
@@ -46,6 +58,16 @@ def main():
     tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="Ano")
     ckpt_dir = os.path.join(tb_logger.log_dir, "checkpoints")
     model = AnonSystem(cfg, num_speakers=num_spk)
+
+    # Ensure full and flattened hyperparameters are persisted at training start.
+    os.makedirs(tb_logger.log_dir, exist_ok=True)
+    with open(os.path.join(tb_logger.log_dir, "hparams_full.yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=False)
+    with open(os.path.join(tb_logger.log_dir, "hparams_full.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=True, indent=2)
+    flat_hparams = _flatten_dict(cfg)
+    flat_hparams["num_speakers"] = int(num_spk)
+    tb_logger.log_hyperparams(flat_hparams)
     
     trainer = pl.Trainer(
         max_steps=cfg['training']['max_steps'],

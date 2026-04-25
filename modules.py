@@ -13,33 +13,41 @@ LRELU_SLOPE = 0.1
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
         super().__init__()
-        if kernel is None:
-            kernel = stride * 2 + stride % 2
-        padding = (kernel - stride) // 2
-        
-        if not transpose:
-            self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
-            self.res = nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
-        else:
-            # ConvTranspose1d 的 output_padding 用于确保输出长度严格等于 input_length * stride
-            self.conv = nn.ConvTranspose1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
-            self.res = nn.ConvTranspose1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
-            
-        self.norm = nn.LayerNorm(out_ch)
+        # Residual unit: two k=3 convolutions + skip connection
+        self.res_conv1 = nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
+        self.res_conv2 = nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
+        self.res_norm1 = nn.LayerNorm(in_ch)
+        self.res_norm2 = nn.LayerNorm(in_ch)
         self.act = nn.GELU()
+
+        # Sampling layer: k = 2 * stride (paper setting)
+        if kernel is None:
+            kernel = 2 * stride
+
+        if not transpose:
+            padding = (kernel - stride) // 2
+            self.sample = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+        else:
+            # For odd stride, use (padding, output_padding) to keep exact scale-up by stride
+            padding = (stride + 1) // 2
+            output_padding = stride % 2
+            self.sample = nn.ConvTranspose1d(
+                in_ch, out_ch, kernel_size=kernel, stride=stride,
+                padding=padding, output_padding=output_padding
+            )
+        self.sample_norm = nn.LayerNorm(out_ch)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, C_in, T]
-        out = self.conv(x)
-        res = self.res(x)
-        
-        # 处理残差连接可能的长度极小差异（通常 padding 已经对齐）
-        # if out.shape[-1] != res.shape[-1]:
-            # min_len = min(out.shape[-1], res.shape[-1])
-            # out = out[..., :min_len]
-            # res = res[..., :min_len]
-            
-        return self.act(self.norm(out.transpose(1, 2)).transpose(1, 2) + res)
+        r = self.res_conv1(x)
+        r = self.act(self.res_norm1(r.transpose(1, 2)).transpose(1, 2))
+        r = self.res_conv2(r)
+        r = self.res_norm2(r.transpose(1, 2)).transpose(1, 2)
+        x = self.act(r + x)
+
+        x = self.sample(x)
+        x = self.act(self.sample_norm(x.transpose(1, 2)).transpose(1, 2))
+        return x
 
 class SpeechEncoder(nn.Module):
     def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
@@ -52,7 +60,8 @@ class SpeechEncoder(nn.Module):
             for i, (c, s) in enumerate(zip(ch, strides))
         ])
         self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
-        self.proj = nn.Conv1d(hidden * 2, hidden, kernel_size=1) 
+        # 论文描述为末端 1D Conv(kernel=7, out_channels=512)；padding=3 以保持时序长度
+        self.proj = nn.Conv1d(hidden * 2, hidden, kernel_size=7, padding=3) 
     
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         # wav: [B, 1, T]
@@ -148,8 +157,8 @@ class Decoder(nn.Module):
         # Encoder 顺序：ConvBlocks -> LSTM -> Proj
         # Decoder 顺序：Proj_inv -> LSTM -> ConvBlocks_inv
         
-        # 1. 镜像 Encoder 的 Proj 层 (hidden -> hidden * 2)
-        self.proj_in = nn.Conv1d(hidden, hidden * 2, kernel_size=1)
+        # 1. 镜像 Encoder 的 Proj 层 (kernel=7)
+        self.proj_in = nn.Conv1d(hidden, hidden * 2, kernel_size=7, padding=3)
         
         # 2. 镜像 Encoder 的 LSTM 层 (hidden * 2 -> hidden)
         # 因为是双向，所以每向维度是 hidden // 2

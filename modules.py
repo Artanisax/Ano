@@ -11,33 +11,55 @@ def get_padding(k: int, d: int = 1) -> int:
 LRELU_SLOPE = 0.1
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None):
+    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
         super().__init__()
         if kernel is None:
             kernel = stride * 2 + stride % 2
         padding = (kernel - stride) // 2
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
-        self.res = nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
+        
+        if not transpose:
+            self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+            self.res = nn.Conv1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
+        else:
+            # ConvTranspose1d 的 output_padding 用于确保输出长度严格等于 input_length * stride
+            self.conv = nn.ConvTranspose1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+            self.res = nn.ConvTranspose1d(in_ch, out_ch, kernel_size=1, stride=stride) if stride > 1 else nn.Identity()
+            
         self.norm = nn.LayerNorm(out_ch)
         self.act = nn.GELU()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, C_in, T] → conv: [B, C_out, T'] → norm/act → + residual
-        return self.act(self.norm(self.conv(x).transpose(1, 2)).transpose(1, 2) + self.res(x))  # [B, C_out, T']
+        # x: [B, C_in, T]
+        out = self.conv(x)
+        res = self.res(x)
+        
+        # 处理残差连接可能的长度极小差异（通常 padding 已经对齐）
+        # if out.shape[-1] != res.shape[-1]:
+            # min_len = min(out.shape[-1], res.shape[-1])
+            # out = out[..., :min_len]
+            # res = res[..., :min_len]
+            
+        return self.act(self.norm(out.transpose(1, 2)).transpose(1, 2) + res)
 
 class SpeechEncoder(nn.Module):
     def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
         super().__init__()
+        # 论文描述：Speech Encoder 由 4 个步长卷积层组成，后接 2 层双向 LSTM
+        # 通道数随深度倍增
         ch = [64, 128, 256, hidden]
         self.convs = nn.ModuleList([
             ConvBlock(1 if i == 0 else ch[i-1], c, stride=s) 
             for i, (c, s) in enumerate(zip(ch, strides))
         ])
         self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
-        self.proj = nn.Conv1d(hidden * 2, hidden, stride=1, kernel_size=7, padding=3)
+        self.proj = nn.Conv1d(hidden * 2, hidden, kernel_size=1) 
+    
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        # wav: [B, 1, T] → convs: [B, hidden, T_feat] → lstm: [B, T_feat, hidden*2] → proj: [B, T_feat, hidden]
-        x = wav  # [B, 1, T]
-        for c in self.convs: x = c(x)  # [B, hidden, T_feat]
+        # wav: [B, 1, T]
+        x = wav
+        for c in self.convs: 
+            x = c(x)
+        # x: [B, hidden, T_feat]
         x, _ = self.lstm(x.transpose(1, 2))  # [B, T_feat, hidden*2]
         return self.proj(x.transpose(1, 2)).transpose(1, 2)  # [B, T_feat, hidden]
 
@@ -120,24 +142,34 @@ class ResidualBottleneck(nn.Module):
         return self.proj_out(quantized), q1, q2, com  # out:[B, T_feat, hidden], q1/q2:[B, T_feat, codebook_dim]
 
 class Decoder(nn.Module):
-    def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512):
+    def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
         super().__init__()
+        # 论文描述：Decoder 结构镜像 Encoder
+        # Encoder 顺序：ConvBlocks -> LSTM -> Proj
+        # Decoder 顺序：Proj_inv -> LSTM -> ConvBlocks_inv
+        
+        # 1. 镜像 Encoder 的 Proj 层 (hidden -> hidden * 2)
+        self.proj_in = nn.Conv1d(hidden, hidden * 2, kernel_size=1)
+        
+        # 2. 镜像 Encoder 的 LSTM 层 (hidden * 2 -> hidden)
+        # 因为是双向，所以每向维度是 hidden // 2
+        self.lstm = nn.LSTM(hidden * 2, hidden // 2, lstm_layers, batch_first=True, bidirectional=True)
+        
+        # 3. 镜像 Encoder 的 ConvBlocks 层 (hidden -> 256 -> 128 -> 64 -> 1)
         t_strides = list(reversed(strides))
         ch = [hidden, 256, 128, 64, 1]
-        
-        self.blocks = nn.ModuleList()
-        for i, s in enumerate(t_strides):
-            k = s * 2 + s % 2
-            p = (k - s) // 2
-            self.blocks.append(
-                nn.ConvTranspose1d(ch[i], ch[i+1], kernel_size=k, stride=s, padding=p)
-            )
-        self.act = nn.GELU()
+        self.blocks = nn.ModuleList([
+            ConvBlock(ch[i], ch[i+1], stride=s, transpose=True)
+            for i, s in enumerate(t_strides)
+        ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, T_feat, hidden] → transpose: [B, hidden, T_feat] → convT: [B, 1, T]
-        for b in self.blocks: 
-            x = self.act(b(x))
+        # x: [B, T_feat, hidden]
+        x = self.proj_in(x.transpose(1, 2)).transpose(1, 2) # [B, T_feat, hidden*2]
+        x, _ = self.lstm(x) # [B, T_feat, hidden]
+        x = x.transpose(1, 2) # [B, hidden, T_feat]
+        for b in self.blocks:
+            x = b(x)
         return x.squeeze(1)  # [B, T]
 
 class WavLMExtractor(nn.Module):

@@ -24,10 +24,10 @@ class AnonSystem(pl.LightningModule):
         self.num_speakers = num_speakers
         
         # 核心编解码模块
-        self.enc = SpeechEncoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'])
+        self.enc = SpeechEncoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'], cfg['model'].get('lstm_layers', 2))
         self.spk_enc = SpeakerEncoder({**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']})
         self.bottleneck = ResidualBottleneck(cfg)
-        self.dec = Decoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'])
+        self.dec = Decoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'], cfg['model'].get('lstm_layers', 2))
         self.disc = HiFiGANDiscriminator()
         
         # 教师模型按需加载（缓存开启时跳过，节省 ~1.5GB 显存）
@@ -94,7 +94,7 @@ class AnonSystem(pl.LightningModule):
         
         # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
         recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
-        wav_rec = self.dec(recon_with_spk.transpose(1, 2))  # [B, C, T] -> [B, T]
+        wav_rec = self.dec(recon_with_spk)  # [B, T_feat, hidden] -> [B, T]
         
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:

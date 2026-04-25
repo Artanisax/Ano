@@ -27,7 +27,7 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
         
         # ───────── 3. 重建输出：加回原始身份 ─────────
         recon_rec = recon + s_orig.unsqueeze(1)
-        wav_rec = model.dec(recon_rec.transpose(1, 2))
+        wav_rec = model.dec(recon_rec)
         
         # ───────── 4. 匿名化输出：加回匿名身份 (论文 Eq.7) ─────────
         pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
@@ -36,7 +36,7 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
         
         recon_anon = recon + s_anon.unsqueeze(1)
-        wav_anon = model.dec(recon_anon.transpose(1, 2))
+        wav_anon = model.dec(recon_anon)
         
         return wav_rec, wav_anon
 

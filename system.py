@@ -52,6 +52,11 @@ class AnonSystem(pl.LightningModule):
         
         self.automatic_optimization = False
 
+    @staticmethod
+    def _set_requires_grad(module: nn.Module, flag: bool):
+        for p in module.parameters():
+            p.requires_grad_(flag)
+
     def get_tokens_dynamic(self, wav_flat: torch.Tensor) -> torch.Tensor:
         if self.wavlm is None or self.kmeans is None:
             raise RuntimeError("教师模型未加载。请确保 data.use_cache=False 或预缓存文件完整。")
@@ -141,15 +146,11 @@ class AnonSystem(pl.LightningModule):
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
         l_emo_chroma = self.l_chroma(q2, chroma_main) if chroma_main is not None else torch.tensor(0.0, device=wav.device)
         
-        # ───────── 3. 对抗损失（补全判别器步） ─────────
-        # 3.1 生成器步
-        y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1))
+        # ───────── 3. 对抗损失（显存优化版） ─────────
+        # 3.1 生成器步：冻结判别器参数，仅保留到 wav_rec 的梯度链路
+        self._set_requires_grad(self.disc, False)
+        y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1), return_fmaps=True)
         l_adv_g = self.l_adv(y_dg, y_dr, f_g, f_r, 'gen')
-        
-        # 3.2 判别器步：必须 detach 切断生成器梯度
-        wav_rec_det = wav_rec.detach()
-        y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1))
-        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
         
         # ───────── 4. 总 Loss 与优化步进 ─────────
         total = (self.cfg['losses']['lambda_r'] * l_rec + 
@@ -166,8 +167,13 @@ class AnonSystem(pl.LightningModule):
         self.manual_backward(total)
         torch.nn.utils.clip_grad_norm_(opt_g.param_groups[0]['params'], max_norm=1.0)
         opt_g.step()
-        
-        # 优化判别器
+
+        # 3.2 判别器步：放在 G step 之后，避免两张计算图同时驻留；且不返回 fmaps
+        self._set_requires_grad(self.disc, True)
+        wav_rec_det = wav_rec.detach()
+        y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1), return_fmaps=False)
+        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
+
         opt_d.zero_grad()
         self.manual_backward(l_adv_d)
         torch.nn.utils.clip_grad_norm_(opt_d.param_groups[0]['params'], max_norm=1.0)

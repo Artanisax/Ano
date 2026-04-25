@@ -342,20 +342,23 @@ class DiscriminatorSTFT(nn.Module):
             norm=norm,
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_fmap: bool = True):
         # x: [B, 1, T] -> complex spectrogram -> concat(real, imag) -> conv2d stack
         if x.dim() == 2:
             x = x.unsqueeze(1)
         z = self.spec_transform(x)
         z = torch.cat([z.real, z.imag], dim=1)
         z = z.transpose(-2, -1)
-        fmap = []
+        fmap = [] if return_fmap else None
         for layer in self.convs:
             z = self.activation(layer(z))
-            fmap.append(z)
+            if return_fmap:
+                fmap.append(z)
         z = self.conv_post(z)
-        fmap.append(z)
-        return z, fmap
+        if return_fmap:
+            fmap.append(z)
+            return z, fmap
+        return z, []
 
 class MultiScaleSTFTDiscriminator(nn.Module):
     def __init__(
@@ -388,12 +391,13 @@ class MultiScaleSTFTDiscriminator(nn.Module):
             for i in range(len(n_ffts))
         ])
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_fmaps: bool = True):
         logits, fmaps = [], []
         for disc in self.discriminators:
-            logit, fmap = disc(x)
+            logit, fmap = disc(x, return_fmap=return_fmaps)
             logits.append(logit)
-            fmaps.append(fmap)
+            if return_fmaps:
+                fmaps.append(fmap)
         return logits, fmaps
 
 class DiscriminatorP(nn.Module):
@@ -411,15 +415,20 @@ class DiscriminatorP(nn.Module):
         ])
         self.conv_post = nf(nn.Conv2d(ch[4], 1, kernel_size=(3, 1), stride=1, padding=(1, 0)))
     
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_fmap: bool = True):
         # x: [B, 1, T] → reshape: [B, 1, T//period, period] → conv2d → flatten
-        fmap, b, c, t = [], *x.shape
+        fmap, b, c, t = ([] if return_fmap else None), *x.shape
         if t % self.period != 0: x = F.pad(x, (0, self.period - t % self.period), "reflect")
         x = x.view(b, c, -1, self.period)  # [B, 1, T//period, period]
         for l in self.convs:
-            x = l(x); x = F.leaky_relu(x, LRELU_SLOPE); fmap.append(x)  # x:[B, C_i, T_i, period]
-        x = self.conv_post(x); fmap.append(x)  # [B, 1, T_out, period]
-        return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T, period]
+            x = l(x); x = F.leaky_relu(x, LRELU_SLOPE)
+            if return_fmap:
+                fmap.append(x)  # x:[B, C_i, T_i, period]
+        x = self.conv_post(x)
+        if return_fmap:
+            fmap.append(x)  # [B, 1, T_out, period]
+            return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T, period]
+        return torch.flatten(x, 1, -1), []
 
 class MultiPeriodDiscriminator(nn.Module):
     def __init__(self):
@@ -432,15 +441,16 @@ class MultiPeriodDiscriminator(nn.Module):
             DiscriminatorP(11),
         ])
 
-    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor, return_fmaps: bool = True):
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
         for d in self.discriminators:
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
+            y_d_r, fmap_r = d(y, return_fmap=return_fmaps)
+            y_d_g, fmap_g = d(y_hat, return_fmap=return_fmaps)
             y_d_rs.append(y_d_r)
             y_d_gs.append(y_d_g)
-            fmap_rs.append(fmap_r)
-            fmap_gs.append(fmap_g)
+            if return_fmaps:
+                fmap_rs.append(fmap_r)
+                fmap_gs.append(fmap_g)
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 class DiscriminatorS(nn.Module):
@@ -458,12 +468,18 @@ class DiscriminatorS(nn.Module):
         ])
         self.conv_post = nf(nn.Conv1d(1024, 1, kernel_size=3, stride=1, padding=1))
     
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_fmap: bool = True):
         # x: [B, 1, T] → conv1d chain → flatten
-        fmap = []
-        for l in self.convs: x = l(x); x = F.leaky_relu(x, LRELU_SLOPE); fmap.append(x)  # x:[B, C_i, T_i]
-        x = self.conv_post(x); fmap.append(x)  # [B, 1, T_out]
-        return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T]
+        fmap = [] if return_fmap else None
+        for l in self.convs:
+            x = l(x); x = F.leaky_relu(x, LRELU_SLOPE)
+            if return_fmap:
+                fmap.append(x)  # x:[B, C_i, T_i]
+        x = self.conv_post(x)
+        if return_fmap:
+            fmap.append(x)  # [B, 1, T_out]
+            return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T]
+        return torch.flatten(x, 1, -1), []
 
 class MultiScaleDiscriminator(nn.Module):
     def __init__(self):
@@ -478,18 +494,19 @@ class MultiScaleDiscriminator(nn.Module):
             nn.AvgPool1d(4, 2, padding=2),
         ])
 
-    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor, return_fmaps: bool = True):
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
         for i, d in enumerate(self.discriminators):
             if i != 0:
                 y = self.meanpools[i - 1](y)
                 y_hat = self.meanpools[i - 1](y_hat)
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
+            y_d_r, fmap_r = d(y, return_fmap=return_fmaps)
+            y_d_g, fmap_g = d(y_hat, return_fmap=return_fmaps)
             y_d_rs.append(y_d_r)
             y_d_gs.append(y_d_g)
-            fmap_rs.append(fmap_r)
-            fmap_gs.append(fmap_g)
+            if return_fmaps:
+                fmap_rs.append(fmap_r)
+                fmap_gs.append(fmap_g)
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 class Discriminator(nn.Module):
@@ -504,7 +521,7 @@ class Discriminator(nn.Module):
             win_lengths=[2048, 1024, 512, 256, 128],
         )
 
-    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor, return_fmaps: bool = True):
         # y/y_hat: [B, 1, T]
         if y.dim() == 2:
             y = y.unsqueeze(1)
@@ -513,23 +530,26 @@ class Discriminator(nn.Module):
 
         y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
 
-        y_mpd_r, y_mpd_g, fmap_mpd_r, fmap_mpd_g = self.mpd(y, y_hat)
+        y_mpd_r, y_mpd_g, fmap_mpd_r, fmap_mpd_g = self.mpd(y, y_hat, return_fmaps=return_fmaps)
         y_d_rs.extend(y_mpd_r)
         y_d_gs.extend(y_mpd_g)
-        fmap_rs.extend(fmap_mpd_r)
-        fmap_gs.extend(fmap_mpd_g)
+        if return_fmaps:
+            fmap_rs.extend(fmap_mpd_r)
+            fmap_gs.extend(fmap_mpd_g)
 
-        y_msd_r, y_msd_g, fmap_msd_r, fmap_msd_g = self.msd(y, y_hat)
+        y_msd_r, y_msd_g, fmap_msd_r, fmap_msd_g = self.msd(y, y_hat, return_fmaps=return_fmaps)
         y_d_rs.extend(y_msd_r)
         y_d_gs.extend(y_msd_g)
-        fmap_rs.extend(fmap_msd_r)
-        fmap_gs.extend(fmap_msd_g)
+        if return_fmaps:
+            fmap_rs.extend(fmap_msd_r)
+            fmap_gs.extend(fmap_msd_g)
 
-        y_stft_r, fmap_stft_r = self.mstftd(y)
-        y_stft_g, fmap_stft_g = self.mstftd(y_hat)
+        y_stft_r, fmap_stft_r = self.mstftd(y, return_fmaps=return_fmaps)
+        y_stft_g, fmap_stft_g = self.mstftd(y_hat, return_fmaps=return_fmaps)
         y_d_rs.extend(y_stft_r)
         y_d_gs.extend(y_stft_g)
-        fmap_rs.extend(fmap_stft_r)
-        fmap_gs.extend(fmap_stft_g)
+        if return_fmaps:
+            fmap_rs.extend(fmap_stft_r)
+            fmap_gs.extend(fmap_stft_g)
 
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs

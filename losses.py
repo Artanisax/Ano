@@ -18,12 +18,7 @@ class LinDistillLoss(nn.Module):
         super().__init__()
         self.proj = nn.Linear(dim, vocab)
     def forward(self, q1: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        t = min(q1.shape[1], tokens.shape[1])
-        if t <= 0:
-            return q1.new_zeros(())
-        logits = self.proj(q1[:, :t]).transpose(1, 2)  # [B, V, T]
-        target = tokens[:, :t].long()                  # [B, T]
-        return F.cross_entropy(logits, target)
+        return F.cross_entropy(self.proj(q1).transpose(1, 2), tokens.long())
 
 class EmoDistillLoss(nn.Module):
     def __init__(self, dim: int):
@@ -34,10 +29,7 @@ class EmoDistillLoss(nn.Module):
     
     def forward(self, q2: torch.Tensor, f0_log: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2).squeeze(-1)
-        t = min(pred.shape[1], f0_log.shape[1])
-        if t <= 0:
-            return pred.new_zeros(())
-        return F.mse_loss(pred[:, :t], f0_log[:, :t])
+        return F.mse_loss(pred, f0_log)
 
 class ChromaDistillLoss(nn.Module):
     def __init__(self, dim: int, n_chroma: int = 24):
@@ -46,13 +38,7 @@ class ChromaDistillLoss(nn.Module):
     
     def forward(self, q2: torch.Tensor, chroma: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2)
-        # Support both [B, T, C] and [B, C, T] chroma layouts.
-        if chroma.dim() == 3 and chroma.shape[1] == pred.shape[-1] and chroma.shape[-1] != pred.shape[-1]:
-            chroma = chroma.transpose(1, 2)
-        t = min(pred.shape[1], chroma.shape[1])
-        if t <= 0:
-            return pred.new_zeros(())
-        return F.mse_loss(pred[:, :t], chroma[:, :t])
+        return F.mse_loss(pred, chroma)
 
 class STFTLoss(nn.Module):
     def __init__(self, fft_size: int, hop_size: int, win_size: int):

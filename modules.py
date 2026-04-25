@@ -50,17 +50,21 @@ class ConvBlock(nn.Module):
         self.res_norm2 = nn.LayerNorm(in_ch)
         self.act = nn.GELU()
 
-        # Sampling layer: k = 2 * stride (paper setting)
+        # Sampling layer:
+        # Use odd kernel for odd stride (k = 2s + 1) so symmetric padding can keep
+        # exact downsample ratio without the 1-frame drift on s=5-like stages.
+        auto_kernel = kernel is None
         if kernel is None:
-            kernel = 2 * stride
+            kernel = 2 * stride + (stride % 2)
 
         if not transpose:
             padding = (kernel - stride) // 2
             self.sample = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
         else:
-            # For odd stride, use (padding, output_padding) to keep exact scale-up by stride
-            padding = (stride + 1) // 2
-            output_padding = stride % 2
+            # Mirror conv downsampling settings.
+            # For the auto kernel above, output_padding=0 gives exact scale-up by stride.
+            padding = (kernel - stride) // 2
+            output_padding = 0 if auto_kernel else (stride % 2)
             self.sample = nn.ConvTranspose1d(
                 in_ch, out_ch, kernel_size=kernel, stride=stride,
                 padding=padding, output_padding=output_padding

@@ -72,52 +72,84 @@ class SpeechEncoder(nn.Module):
         x, _ = self.lstm(x.transpose(1, 2))  # [B, T_feat, hidden*2]
         return self.proj(x.transpose(1, 2)).transpose(1, 2)  # [B, T_feat, hidden]
 
+class Conv1dGLU(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dropout: float):
+        super().__init__()
+        padding = (kernel_size - 1) // 2
+        self.conv = nn.Conv1d(in_ch, out_ch * 2, kernel_size=kernel_size, padding=padding)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, C]
+        h = self.conv(x.transpose(1, 2)).transpose(1, 2)  # [B, T, 2C]
+        h = F.glu(h, dim=-1)  # [B, T, out_ch]
+        h = self.dropout(h)
+        return h + x
+
 class SpeakerEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
-        K = len(cfg['ref_enc_filters'])
-        filters = [1] + cfg['ref_enc_filters']
-        self.convs = nn.ModuleList([
-            nn.Conv2d(
-                in_channels=filters[i], 
-                out_channels=filters[i+1], 
-                kernel_size=(cfg['ref_enc_size'], cfg['ref_enc_size']),
-                stride=(cfg['ref_enc_strides'][i], cfg['ref_enc_strides'][i]), 
-                padding=cfg['ref_enc_pad']
-            )
-            for i in range(K)
-        ])
-        self.bns = nn.ModuleList([nn.BatchNorm2d(f) for f in filters[1:]])
+        in_dim = cfg['n_mels']
+        hidden = cfg.get('style_hidden', 128)
+        out_dim = cfg['dim']
+        kernel = cfg.get('style_tcn_kernel', 5)
+        num_heads = cfg.get('style_head', 2)
+        dropout = cfg.get('dropout', 0.1)
 
-        # 动态计算卷积压缩后的频率维度
-        def get_conv_out(in_size, kernel, stride, pad):
-            return (in_size + 2 * pad - kernel) // stride + 1
+        # 1) Spectral processing (Linear + Mish + Dropout) x2
+        self.spectral = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.Mish(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.Mish(),
+            nn.Dropout(dropout),
+        )
 
-        H = cfg['n_mels']  # 初始 80
-        for s in cfg['ref_enc_strides']:
-            H = get_conv_out(H, cfg['ref_enc_size'], s, cfg['ref_enc_pad'])
-            
-        out_dim = filters[-1] * H  # e.g., 128 * 3 = 384
-        self.gru = nn.GRU(out_dim, cfg['ref_enc_gru_size'], batch_first=True)
-        
-        self.attn = nn.MultiheadAttention(cfg['ref_enc_gru_size'], cfg['num_heads'], batch_first=True)
-        self.proj = nn.Linear(cfg['ref_enc_gru_size'], cfg['dim'])
-        self.heads = nn.ModuleList([nn.Linear(cfg['dim'], cfg['dim']) for _ in range(cfg['num_heads'])])
-        self.fusion = nn.Linear(cfg['dim'] * cfg['num_heads'], cfg['dim'])
+        # 2) Temporal processing (2 x Conv1dGLU with residual)
+        self.temporal = nn.Sequential(
+            Conv1dGLU(hidden, hidden, kernel, dropout),
+            Conv1dGLU(hidden, hidden, kernel, dropout),
+        )
+
+        # 3) Frame-level multi-head self-attention + frame-wise FC
+        self.slf_attn = nn.MultiheadAttention(hidden, num_heads, dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden, out_dim)
+
+    def temporal_avg_pool(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        if mask is None:
+            return torch.mean(x, dim=1)
+        lengths = (~mask).sum(dim=1).unsqueeze(1).clamp_min(1)
+        x = x.masked_fill(mask.unsqueeze(-1), 0.0)
+        return x.sum(dim=1) / lengths
 
     def forward(self, mel: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-        # mel: [B, 1, F, T_mel] → convs: [B, C_last, H_last, T'] → permute/view: [B, T', C_last*H_last]
-        x = mel  # [B, 1, F, T_mel]
-        for c, b in zip(self.convs, self.bns): 
-            x = F.leaky_relu(b(c(x)), LRELU_SLOPE)  # [B, C_i, H_i, T_i]
-        B, C, H, T = x.shape
-        x = x.permute(0, 3, 1, 2).contiguous().view(B, T, C * H)  # [B, T, C*H]
-        x, _ = self.gru(x)  # [B, T, gru_size]
-        q = x.mean(dim=1, keepdim=True)  # [B, 1, gru_size]
-        attn, _ = self.attn(q, x, x, key_padding_mask=mask)  # [B, 1, gru_size]
-        base = self.proj(attn.squeeze(1))  # [B, dim]
-        tokens = [h(base) for h in self.heads]  # List of [B, dim]
-        return self.fusion(torch.cat(tokens, dim=-1))  # [B, dim]
+        # Compatible input:
+        # [B, 1, F, T] -> [B, T, F], or already [B, T, F]
+        if mel.dim() == 4:
+            x = mel.squeeze(1).transpose(1, 2)
+        elif mel.dim() == 3:
+            x = mel
+        else:
+            raise ValueError(f"Unexpected mel shape: {tuple(mel.shape)}")
+
+        max_len = x.shape[1]
+        slf_attn_mask = mask.unsqueeze(1).expand(-1, max_len, -1) if mask is not None else None
+
+        # spectral
+        x = self.spectral(x)
+        # temporal
+        x = self.temporal(x)
+        # self-attention
+        if mask is not None:
+            x = x.masked_fill(mask.unsqueeze(-1), 0.0)
+        # nn.MultiheadAttention uses key_padding_mask; slf_attn_mask kept for parity/readability
+        _ = slf_attn_mask
+        x, _ = self.slf_attn(x, x, x, key_padding_mask=mask)
+        # fc
+        x = self.fc(x)
+        # temporal average pooling
+        return self.temporal_avg_pool(x, mask=mask)
 
 class ResidualBottleneck(nn.Module):
     def __init__(self, cfg: dict):

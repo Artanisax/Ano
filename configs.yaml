@@ -12,12 +12,10 @@ model:
   encoder_strides: [2, 4, 5, 8]
   speaker:
     dim: 512
-    ref_enc_filters: [32, 32, 64, 64, 128, 128]
-    ref_enc_size: 3
-    ref_enc_strides: [1, 2, 2, 2, 2, 2]
-    ref_enc_pad: 1
-    ref_enc_gru_size: 256
-    num_heads: 4
+    style_hidden: 128
+    style_head: 2
+    style_tcn_kernel: 5
+    dropout: 0.1
   bottleneck:
     num_quantizers: 8
     codebook_size: 1024
@@ -83,7 +81,6 @@ anonymization:
   num_candidates: 20
   alpha_cond3: 0.9
   alpha_cond4: 0.8
-  anon_dim: 512
 
 # 全局默认 STFT 参数（供其他模块回退使用）
 stft:
@@ -102,6 +99,5 @@ paths:
   test_dirs:  ["data/raw/LibriSpeech/test-clean", "data/raw/LibriTTS/test-clean"]
   manifest_dir: "data/processed/manifests"
   kmeans_path:  "data/processed/kmeans/kmeans_model.pkl"
-  spk_map_path: "data/processed/spk_map.json"
   log_dir:        "runs/"
   test_out_dir:   "data/anonymized_test/"

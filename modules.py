@@ -230,6 +230,94 @@ class WavLMExtractor(nn.Module):
         out = self.model(wav.squeeze(1), output_hidden_states=True)
         return out.hidden_states[self.layer]  # [B, T_wavlm, D_wavlm]
 
+class DiscriminatorSTFT(nn.Module):
+    def __init__(
+        self,
+        filters: int = 32,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        n_fft: int = 1024,
+        hop_length: int = 256,
+        win_length: int = 1024,
+    ):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.register_buffer("window", torch.hann_window(win_length), persistent=False)
+
+        c_in = in_channels * 2  # real + imag
+        ch = [filters, filters * 2, filters * 4, filters * 8]
+        self.convs = nn.ModuleList([
+            nn.Conv2d(c_in, ch[0], kernel_size=(3, 9), stride=(1, 1), padding=(1, 4)),
+            nn.Conv2d(ch[0], ch[1], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 1), padding=(1, 4)),
+            nn.Conv2d(ch[1], ch[2], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 2), padding=(1, 8)),
+            nn.Conv2d(ch[2], ch[3], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 4), padding=(1, 16)),
+        ])
+        self.conv_post = nn.Conv2d(ch[3], out_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+
+    def forward(self, x: torch.Tensor):
+        # x: [B, 1, T] -> STFT: [B, F, TT] complex -> [B, 2, F, TT]
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x_spec = torch.stft(
+            x.squeeze(1),
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=self.window,
+            return_complex=True,
+            center=True,
+            pad_mode="reflect",
+        )
+        x = torch.cat([x_spec.real.unsqueeze(1), x_spec.imag.unsqueeze(1)], dim=1)
+        fmap = []
+        for layer in self.convs:
+            x = F.leaky_relu(layer(x), LRELU_SLOPE)
+            fmap.append(x)
+        x = self.conv_post(x)
+        fmap.append(x)
+        return torch.flatten(x, 1, -1), fmap
+
+class MultiScaleSTFTDiscriminator(nn.Module):
+    def __init__(
+        self,
+        filters: int = 32,
+        in_channels: int = 1,
+        out_channels: int = 1,
+        n_ffts: list = None,
+        hop_lengths: list = None,
+        win_lengths: list = None,
+    ):
+        super().__init__()
+        if n_ffts is None:
+            n_ffts = [2048, 1024, 512, 256, 128]
+        if hop_lengths is None:
+            hop_lengths = [512, 256, 128, 64, 32]
+        if win_lengths is None:
+            win_lengths = [2048, 1024, 512, 256, 128]
+        assert len(n_ffts) == len(hop_lengths) == len(win_lengths)
+
+        self.discriminators = nn.ModuleList([
+            DiscriminatorSTFT(
+                filters=filters,
+                in_channels=in_channels,
+                out_channels=out_channels,
+                n_fft=n_ffts[i],
+                hop_length=hop_lengths[i],
+                win_length=win_lengths[i],
+            )
+            for i in range(len(n_ffts))
+        ])
+
+    def forward(self, x: torch.Tensor):
+        logits, fmaps = [], []
+        for disc in self.discriminators:
+            logit, fmap = disc(x)
+            logits.append(logit)
+            fmaps.append(fmap)
+        return logits, fmaps
+
 class DiscriminatorP(nn.Module):
     def __init__(self, period: int, kernel: int = 5, stride: int = 3, use_sn: bool = False):
         super().__init__()
@@ -254,17 +342,39 @@ class DiscriminatorP(nn.Module):
         x = self.conv_post(x); fmap.append(x)  # [B, 1, T_out, period]
         return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T, period]
 
+class MultiPeriodDiscriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.discriminators = nn.ModuleList([
+            DiscriminatorP(2),
+            DiscriminatorP(3),
+            DiscriminatorP(5),
+            DiscriminatorP(7),
+            DiscriminatorP(11),
+        ])
+
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+        for d in self.discriminators:
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
 class DiscriminatorS(nn.Module):
     def __init__(self, use_sn: bool = False):
         super().__init__()
         nf = nn.utils.spectral_norm if use_sn else nn.utils.weight_norm
         self.convs = nn.ModuleList([
             nf(nn.Conv1d(1, 128, kernel_size=15, stride=1, padding=7)),
-            nf(nn.Conv1d(128, 128, kernel_size=41, stride=4, groups=4, padding=20)),
-            nf(nn.Conv1d(128, 256, kernel_size=41, stride=4, groups=16, padding=20)),
+            nf(nn.Conv1d(128, 128, kernel_size=41, stride=2, groups=4, padding=20)),
+            nf(nn.Conv1d(128, 256, kernel_size=41, stride=2, groups=16, padding=20)),
             nf(nn.Conv1d(256, 512, kernel_size=41, stride=4, groups=16, padding=20)),
             nf(nn.Conv1d(512, 1024, kernel_size=41, stride=4, groups=16, padding=20)),
-            nf(nn.Conv1d(1024, 1024, kernel_size=41, stride=2, groups=16, padding=20)),
+            nf(nn.Conv1d(1024, 1024, kernel_size=41, stride=1, groups=16, padding=20)),
             nf(nn.Conv1d(1024, 1024, kernel_size=5, stride=1, padding=2)),
         ])
         self.conv_post = nf(nn.Conv1d(1024, 1, kernel_size=3, stride=1, padding=1))
@@ -276,21 +386,71 @@ class DiscriminatorS(nn.Module):
         x = self.conv_post(x); fmap.append(x)  # [B, 1, T_out]
         return torch.flatten(x, 1, -1), fmap  # score:[B, *], fmap:List of [B, C, T]
 
-class HiFiGANDiscriminator(nn.Module):
+class MultiScaleDiscriminator(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mpd = nn.ModuleList([DiscriminatorP(p) for p in [2, 3, 5, 7, 11]])
-        self.msd = nn.ModuleList([DiscriminatorS(use_sn=(i == 0)) for i in range(3)])
-        self.pools = nn.ModuleList([nn.AvgPool1d(4, 2, padding=2), nn.AvgPool1d(4, 2, padding=2)])
-    
+        self.discriminators = nn.ModuleList([
+            DiscriminatorS(use_sn=True),
+            DiscriminatorS(),
+            DiscriminatorS(),
+        ])
+        self.meanpools = nn.ModuleList([
+            nn.AvgPool1d(4, 2, padding=2),
+            nn.AvgPool1d(4, 2, padding=2),
+        ])
+
     def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
-        # y/y_hat: [B, 1, T] → MPD+MSD → scores & feature maps
-        y_dr, y_dg, f_r, f_g = [], [], [], []
-        for d in self.mpd:
-            r, fr = d(y); g, fg = d(y_hat)  # r/g:[B,*], fr/fg:List
-            y_dr.append(r); y_dg.append(g); f_r.append(fr); f_g.append(fg)
-        for i, d in enumerate(self.msd):
-            y_, yh_ = (self.pools[i-1](y), self.pools[i-1](y_hat)) if i > 0 else (y, y_hat)
-            r, fr = d(y_); g, fg = d(yh_)
-            y_dr.append(r); y_dg.append(g); f_r.append(fr); f_g.append(fg)
-        return y_dr, y_dg, f_r, f_g  # Lists of [B, ...] / List of Lists
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+        for i, d in enumerate(self.discriminators):
+            if i != 0:
+                y = self.meanpools[i - 1](y)
+                y_hat = self.meanpools[i - 1](y_hat)
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mpd = MultiPeriodDiscriminator()
+        self.msd = MultiScaleDiscriminator()
+        self.mstftd = MultiScaleSTFTDiscriminator(
+            filters=32,
+            n_ffts=[2048, 1024, 512, 256, 128],
+            hop_lengths=[512, 256, 128, 64, 32],
+            win_lengths=[2048, 1024, 512, 256, 128],
+        )
+
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor):
+        # y/y_hat: [B, 1, T]
+        if y.dim() == 2:
+            y = y.unsqueeze(1)
+        if y_hat.dim() == 2:
+            y_hat = y_hat.unsqueeze(1)
+
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+
+        y_mpd_r, y_mpd_g, fmap_mpd_r, fmap_mpd_g = self.mpd(y, y_hat)
+        y_d_rs.extend(y_mpd_r)
+        y_d_gs.extend(y_mpd_g)
+        fmap_rs.extend(fmap_mpd_r)
+        fmap_gs.extend(fmap_mpd_g)
+
+        y_msd_r, y_msd_g, fmap_msd_r, fmap_msd_g = self.msd(y, y_hat)
+        y_d_rs.extend(y_msd_r)
+        y_d_gs.extend(y_msd_g)
+        fmap_rs.extend(fmap_msd_r)
+        fmap_gs.extend(fmap_msd_g)
+
+        y_stft_r, fmap_stft_r = self.mstftd(y)
+        y_stft_g, fmap_stft_g = self.mstftd(y_hat)
+        y_d_rs.extend(y_stft_r)
+        y_d_gs.extend(y_stft_g)
+        fmap_rs.extend(fmap_stft_r)
+        fmap_gs.extend(fmap_stft_g)
+
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs

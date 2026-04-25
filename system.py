@@ -28,7 +28,7 @@ class AnonSystem(pl.LightningModule):
         self.spk_enc = SpeakerEncoder({**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']})
         self.bottleneck = ResidualBottleneck(cfg)
         self.dec = Decoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'], cfg['model'].get('lstm_layers', 2))
-        self.disc = HiFiGANDiscriminator()
+        self.disc = Discriminator()
         
         # 教师模型按需加载（缓存开启时跳过，节省 ~1.5GB 显存）
         self.use_cache = cfg['data']['use_cache']

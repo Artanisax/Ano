@@ -6,7 +6,7 @@ from system import AnonSystem
 from utils import load_audio, save_audio, compute_mel, normalize_audio, get_stft_params
 import torch.nn.functional as F
 
-def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
+def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: int):
     """
     VPC 2024 双输出推理管线 (严格对齐论文 §3.1, §3.4, Figure 1)
     共享 Encoder & Bottleneck，分别加回 s_orig 与 s_anon 进行解码
@@ -30,7 +30,8 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device):
         wav_rec = model.dec(recon_rec)
         
         # ───────── 4. 匿名化输出：加回匿名身份 (论文 Eq.7) ─────────
-        pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:20]
+        n_select = min(num_candidates, vctk_pool.size(0))
+        pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:n_select]
         s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True).view(1, -1)
         s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
@@ -46,6 +47,7 @@ def main():
     parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
     parser.add_argument('--output', default='outputs', help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
+    parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用 configs.yaml')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     parser.add_argument('--ext', nargs='+', default=['.wav', '.flac'], help='支持的音频扩展名')
     args = parser.parse_args()
@@ -79,7 +81,12 @@ def main():
         vctk_pool = F.normalize(vctk_pool, dim=1, p=2)
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
-    print(f"✅ 环境就绪 | Condition {args.condition} (α={alpha}) | Device: {args.device}\n")
+    num_candidates = args.num_candidates
+    if num_candidates is None:
+        num_candidates = cfg['anonymization'].get('num_candidates', 20)
+    if num_candidates <= 0:
+        raise ValueError(f"num_candidates 必须 > 0，当前为 {num_candidates}")
+    print(f"✅ 环境就绪 | Condition {args.condition} (α={alpha}) | Candidates: {num_candidates} | Device: {args.device}\n")
 
     # ───────── 3. 推理执行 ─────────
     if input_path.is_file():
@@ -93,7 +100,7 @@ def main():
         if pad_len > 0:
             wav = F.pad(wav, (0, pad_len), mode='reflect')
         
-        wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+        wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device, num_candidates)
         
         # 裁剪回原始长度
         wav_rec = wav_rec[..., :orig_len]
@@ -131,7 +138,7 @@ def main():
                 if pad_len > 0:
                     wav = F.pad(wav, (0, pad_len), mode='reflect')
                 
-                wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device)
+                wav_rec, wav_anon = generate_dual_outputs(model, wav, alpha, vctk_pool, args.device, num_candidates)
                 
                 # 裁剪回原始长度
                 wav_rec = wav_rec[..., :orig_len]

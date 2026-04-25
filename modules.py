@@ -2,11 +2,41 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 from vector_quantize_pytorch import ResidualVQ
 from transformers import WavLMModel
 
 def get_padding(k: int, d: int = 1) -> int:
     return (k * d - d) // 2
+
+def get_2d_padding(kernel_size: tuple, dilation: tuple = (1, 1)) -> tuple:
+    return (
+        ((kernel_size[0] - 1) * dilation[0]) // 2,
+        ((kernel_size[1] - 1) * dilation[1]) // 2,
+    )
+
+def norm_conv2d(
+    in_ch: int,
+    out_ch: int,
+    kernel_size: tuple,
+    stride: tuple = (1, 1),
+    dilation: tuple = (1, 1),
+    padding: tuple = (0, 0),
+    norm: str = "weight_norm",
+) -> nn.Module:
+    conv = nn.Conv2d(
+        in_ch,
+        out_ch,
+        kernel_size=kernel_size,
+        stride=stride,
+        dilation=dilation,
+        padding=padding,
+    )
+    if norm == "weight_norm":
+        return nn.utils.weight_norm(conv)
+    if norm == "spectral_norm":
+        return nn.utils.spectral_norm(conv)
+    return conv
 
 LRELU_SLOPE = 0.1
 
@@ -239,45 +269,93 @@ class DiscriminatorSTFT(nn.Module):
         n_fft: int = 1024,
         hop_length: int = 256,
         win_length: int = 1024,
+        max_filters: int = 1024,
+        filters_scale: int = 1,
+        kernel_size: tuple = (3, 9),
+        dilations: list = None,
+        stride: tuple = (1, 2),
+        normalized: bool = True,
+        norm: str = "weight_norm",
+        activation_slope: float = 0.2,
     ):
         super().__init__()
+        if dilations is None:
+            dilations = [1, 2, 4]
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
-        self.register_buffer("window", torch.hann_window(win_length), persistent=False)
-
-        c_in = in_channels * 2  # real + imag
-        ch = [filters, filters * 2, filters * 4, filters * 8]
-        self.convs = nn.ModuleList([
-            nn.Conv2d(c_in, ch[0], kernel_size=(3, 9), stride=(1, 1), padding=(1, 4)),
-            nn.Conv2d(ch[0], ch[1], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 1), padding=(1, 4)),
-            nn.Conv2d(ch[1], ch[2], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 2), padding=(1, 8)),
-            nn.Conv2d(ch[2], ch[3], kernel_size=(3, 9), stride=(2, 1), dilation=(1, 4), padding=(1, 16)),
-        ])
-        self.conv_post = nn.Conv2d(ch[3], out_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
-
-    def forward(self, x: torch.Tensor):
-        # x: [B, 1, T] -> STFT: [B, F, TT] complex -> [B, 2, F, TT]
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        x_spec = torch.stft(
-            x.squeeze(1),
+        self.activation = nn.LeakyReLU(negative_slope=activation_slope)
+        self.spec_transform = torchaudio.transforms.Spectrogram(
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.win_length,
-            window=self.window,
-            return_complex=True,
-            center=True,
-            pad_mode="reflect",
+            window_fn=torch.hann_window,
+            normalized=normalized,
+            center=False,
+            pad_mode=None,
+            power=None,
         )
-        x = torch.cat([x_spec.real.unsqueeze(1), x_spec.imag.unsqueeze(1)], dim=1)
+
+        spec_channels = 2 * in_channels
+        self.convs = nn.ModuleList()
+        self.convs.append(
+            norm_conv2d(
+                spec_channels,
+                filters,
+                kernel_size=kernel_size,
+                padding=get_2d_padding(kernel_size),
+                norm=norm,
+            )
+        )
+
+        in_chs = min(filters_scale * filters, max_filters)
+        for i, dilation in enumerate(dilations):
+            out_chs = min((filters_scale ** (i + 1)) * filters, max_filters)
+            self.convs.append(
+                norm_conv2d(
+                    in_chs,
+                    out_chs,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    dilation=(dilation, 1),
+                    padding=get_2d_padding(kernel_size, (dilation, 1)),
+                    norm=norm,
+                )
+            )
+            in_chs = out_chs
+
+        out_chs = min((filters_scale ** (len(dilations) + 1)) * filters, max_filters)
+        self.convs.append(
+            norm_conv2d(
+                in_chs,
+                out_chs,
+                kernel_size=(kernel_size[0], kernel_size[0]),
+                padding=get_2d_padding((kernel_size[0], kernel_size[0])),
+                norm=norm,
+            )
+        )
+        self.conv_post = norm_conv2d(
+            out_chs,
+            out_channels,
+            kernel_size=(kernel_size[0], kernel_size[0]),
+            padding=get_2d_padding((kernel_size[0], kernel_size[0])),
+            norm=norm,
+        )
+
+    def forward(self, x: torch.Tensor):
+        # x: [B, 1, T] -> complex spectrogram -> concat(real, imag) -> conv2d stack
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        z = self.spec_transform(x)
+        z = torch.cat([z.real, z.imag], dim=1)
+        z = z.transpose(-2, -1)
         fmap = []
         for layer in self.convs:
-            x = F.leaky_relu(layer(x), LRELU_SLOPE)
-            fmap.append(x)
-        x = self.conv_post(x)
-        fmap.append(x)
-        return torch.flatten(x, 1, -1), fmap
+            z = self.activation(layer(z))
+            fmap.append(z)
+        z = self.conv_post(z)
+        fmap.append(z)
+        return z, fmap
 
 class MultiScaleSTFTDiscriminator(nn.Module):
     def __init__(
@@ -420,9 +498,9 @@ class Discriminator(nn.Module):
         self.msd = MultiScaleDiscriminator()
         self.mstftd = MultiScaleSTFTDiscriminator(
             filters=32,
-            n_ffts=[2048, 1024, 512, 256, 128],
-            hop_lengths=[512, 256, 128, 64, 32],
-            win_lengths=[2048, 1024, 512, 256, 128],
+            n_ffts=[1024, 2048, 512, 256, 128],
+            hop_lengths=[256, 512, 128, 64, 32],
+            win_lengths=[1024, 2048, 512, 256, 128],
         )
 
     def forward(self, y: torch.Tensor, y_hat: torch.Tensor):

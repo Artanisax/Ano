@@ -245,8 +245,8 @@ class AnonSystem(pl.LightningModule):
         opt_d = torch.optim.AdamW(
             self.disc.parameters(), 
             lr=self.cfg['training']['lr'],
-            betas=(0.9, 0.999),
-            weight_decay=0.0
+            betas=self.cfg['training']['betas'],
+            weight_decay=self.cfg['training']['weight_decay']
         )
         
         scheduler_g = torch.optim.lr_scheduler.ExponentialLR(opt_g, gamma=self.cfg['training']['gamma'])

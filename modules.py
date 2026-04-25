@@ -114,6 +114,7 @@ class SpeakerEncoder(nn.Module):
 
         # 3) Frame-level multi-head self-attention + frame-wise FC
         self.slf_attn = nn.MultiheadAttention(hidden, num_heads, dropout=dropout, batch_first=True)
+        self.attn_dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden, out_dim)
 
     def temporal_avg_pool(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
@@ -145,7 +146,9 @@ class SpeakerEncoder(nn.Module):
             x = x.masked_fill(mask.unsqueeze(-1), 0.0)
         # nn.MultiheadAttention uses key_padding_mask; slf_attn_mask kept for parity/readability
         _ = slf_attn_mask
+        residual = x
         x, _ = self.slf_attn(x, x, x, key_padding_mask=mask)
+        x = self.attn_dropout(x) + residual
         # fc
         x = self.fc(x)
         # temporal average pooling

@@ -100,10 +100,10 @@ class AnonSystem(pl.LightningModule):
         # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
         recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
         wav_rec = self.dec(recon_with_spk)  # [B, T_feat, hidden] -> [B, T]
+        
+        # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:
-            raise RuntimeError(
-                f"Decoder 输出长度错误: wav_rec={wav_rec.shape[-1]}, wav_main={wav_main.shape[-1]}"
-            )
+            wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
         if is_train:
             # ───────── 蒸馏路径：仅提取 s1, s2 用于说话人一致性约束 ─────────
@@ -133,10 +133,10 @@ class AnonSystem(pl.LightningModule):
         # ───────── 1. 重建损失 ─────────
         mel_gt = self._compute_mel_3d(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
-        if mel_rec.shape[-1] != mel_gt.shape[-1]:
-            raise RuntimeError(
-                f"Mel 帧数不一致: mel_rec={mel_rec.shape[-1]}, mel_gt={mel_gt.shape[-1]}"
-            )
+        
+        T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
+        mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]
+ 
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1))
         

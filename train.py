@@ -27,6 +27,8 @@ def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
 def main():
     with open("configs.yaml") as f: cfg = yaml.safe_load(f)
     setup_seed(cfg.get('random_seed', 42))
+    train_workers = cfg['training'].get('train_num_workers', cfg['training'].get('num_workers', 0))
+    val_workers = cfg['training'].get('val_num_workers', cfg['training'].get('num_workers', 0))
     
     os.makedirs(cfg['paths']['manifest_dir'], exist_ok=True)
     train_mf = os.path.join(cfg['paths']['manifest_dir'], "train_manifest.txt")
@@ -42,17 +44,19 @@ def main():
         train_ds,
         batch_size=cfg['training']['batch_size'],
         shuffle=True, 
-        num_workers=cfg['training']['num_workers'],
+        num_workers=train_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=train_workers > 0,
     )
     val_dl = torch.utils.data.DataLoader(
         val_ds,
         batch_size=cfg['training']['batch_size'],
         shuffle=False, 
-        num_workers=cfg['training']['num_workers'],
+        num_workers=val_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=val_workers > 0,
     )
     
     tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="Ano")

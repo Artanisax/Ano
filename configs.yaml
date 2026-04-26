@@ -34,9 +34,8 @@ training:
   gamma: 0.9
   betas: [0.8, 0.999]
   weight_decay: 1.25e-5
-  num_workers: 16
-  train_num_workers: 12
-  val_num_workers: 4
+  train_num_workers: 20
+  val_num_workers: 20
   precision: "bf16"
   target_samples: 96000
   # val_check_interval: 0.001

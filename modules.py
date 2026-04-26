@@ -252,7 +252,7 @@ class Decoder(nn.Module):
         x = x.transpose(1, 2) # [B, hidden, T_feat]
         for b in self.blocks:
             x = b(x)
-        return x.squeeze(1)  # [B, T]
+        return torch.tanh(x.squeeze(1))  # [B, T]
 
 class WavLMExtractor(nn.Module):
     def __init__(self, name: str = "microsoft/wavlm-large", layer: int = 12):

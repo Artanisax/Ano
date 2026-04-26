@@ -69,7 +69,10 @@ class ConvBlock(nn.Module):
                 in_ch, out_ch, kernel_size=kernel, stride=stride,
                 padding=padding, output_padding=output_padding
             )
-        self.sample_norm = nn.LayerNorm(out_ch)
+        # For waveform output layer (decoder last block, out_ch=1), avoid LN+activation:
+        # LayerNorm(1) collapses temporal variation to a near-constant affine output.
+        self.apply_sample_post = not (transpose and out_ch == 1)
+        self.sample_norm = nn.LayerNorm(out_ch) if self.apply_sample_post else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, C_in, T]
@@ -80,7 +83,8 @@ class ConvBlock(nn.Module):
         x = self.act(r + x)
 
         x = self.sample(x)
-        x = self.act(self.sample_norm(x.transpose(1, 2)).transpose(1, 2))
+        if self.apply_sample_post:
+            x = self.act(self.sample_norm(x.transpose(1, 2)).transpose(1, 2))
         return x
 
 class SpeechEncoder(nn.Module):

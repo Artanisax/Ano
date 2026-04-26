@@ -145,6 +145,14 @@ def save_audio(wav: torch.Tensor, path: str, sr: int = 16000):
     torchaudio.save(path, wav, sr)
 
 def normalize_audio(wav: torch.Tensor, target_peak: float = 0.95) -> torch.Tensor:
+    # Robust audio export/logging:
+    # 1) clear NaN/Inf
+    # 2) remove DC offset so tiny constant bias is not amplified to full-scale
+    wav = torch.nan_to_num(wav, nan=0.0, posinf=0.0, neginf=0.0)
+    if wav.dim() >= 2:
+        wav = wav - wav.mean(dim=-1, keepdim=True)
+    else:
+        wav = wav - wav.mean()
     peak = wav.abs().max()
     if peak > 1e-6:
         wav = wav / peak * target_peak

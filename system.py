@@ -150,7 +150,9 @@ class AnonSystem(pl.LightningModule):
         # 3.1 生成器步：冻结判别器参数，仅保留到 wav_rec 的梯度链路
         self._set_requires_grad(self.disc, False)
         y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1), return_fmaps=True)
-        l_adv_g = self.l_adv(y_dg, y_dr, f_g, f_r, 'gen')
+        l_adv_g, l_adv_g_adv, l_adv_g_fm = self.l_adv(
+            y_dg, y_dr, f_g, f_r, 'gen', return_components=True
+        )
         
         # ───────── 4. 总 Loss 与优化步进 ─────────
         total = (self.cfg['losses']['lambda_r'] * l_rec + 
@@ -172,7 +174,9 @@ class AnonSystem(pl.LightningModule):
         self._set_requires_grad(self.disc, True)
         wav_rec_det = wav_rec.detach()
         y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec_det.unsqueeze(1), return_fmaps=False)
-        l_adv_d = self.l_adv(y_dg_d, y_dr_d, [], [], 'disc')
+        l_adv_d, l_adv_d_real, l_adv_d_fake = self.l_adv(
+            y_dg_d, y_dr_d, [], [], 'disc', return_components=True
+        )
 
         opt_d.zero_grad()
         self.manual_backward(l_adv_d)
@@ -186,7 +190,12 @@ class AnonSystem(pl.LightningModule):
                 'train/rec': l_rec,
                 'train/mrstft': l_mrstft,
                 'train/adv_g': l_adv_g,
+                'train/adv_g_adv': l_adv_g_adv,
+                'train/adv_g_fm': l_adv_g_fm,
+                'train/adv_g_fm_x2': 2.0 * l_adv_g_fm,
                 'train/adv_d': l_adv_d,
+                'train/adv_d_real': l_adv_d_real,
+                'train/adv_d_fake': l_adv_d_fake,
                 'train/com': com,
                 'train/spk': l_spk,
                 'train/lin': l_lin,

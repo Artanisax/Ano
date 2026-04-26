@@ -192,7 +192,6 @@ class AnonSystem(pl.LightningModule):
                 'train/adv_g': l_adv_g,
                 'train/adv_g_adv': l_adv_g_adv,
                 'train/adv_g_fm': l_adv_g_fm,
-                'train/adv_g_fm_x2': 2.0 * l_adv_g_fm,
                 'train/adv_d': l_adv_d,
                 'train/adv_d_real': l_adv_d_real,
                 'train/adv_d_fake': l_adv_d_fake,

@@ -49,8 +49,10 @@ class STFTLoss(nn.Module):
         self.register_buffer('window', torch.hann_window(win_size))
     
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        min_len = min(x.shape[-1], y.shape[-1])
-        x, y = x[..., :min_len], y[..., :min_len]
+        if x.shape[-1] != y.shape[-1]:
+            raise RuntimeError(
+                f"STFTLoss 输入长度不一致: x={x.shape[-1]}, y={y.shape[-1]}"
+            )
 
         x_spec = torch.stft(x, self.fft_size, self.hop_size, self.win_size,
                         window=self.window, return_complex=True, center=False)

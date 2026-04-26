@@ -43,12 +43,16 @@ LRELU_SLOPE = 0.1
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
         super().__init__()
-        # Residual unit: two k=3 convolutions + skip connection
-        self.res_conv1 = nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
-        self.res_conv2 = nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
-        self.res_norm1 = nn.LayerNorm(in_ch)
-        self.res_norm2 = nn.LayerNorm(in_ch)
-        self.act = nn.GELU()
+        # HiFi-Codec-like pre-activation residual unit:
+        # no activation-dependent feature normalization inside the block,
+        # use weight norm on convolutions and LeakyReLU nonlinearity.
+        self.res_conv1 = nn.utils.weight_norm(
+            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
+        )
+        self.res_conv2 = nn.utils.weight_norm(
+            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
+        )
+        self.act = nn.LeakyReLU(LRELU_SLOPE)
 
         # Sampling layer:
         # Use odd kernel for odd stride (k = 2s + 1) so symmetric padding can keep
@@ -59,32 +63,42 @@ class ConvBlock(nn.Module):
 
         if not transpose:
             padding = (kernel - stride) // 2
-            self.sample = nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+            self.sample = nn.utils.weight_norm(
+                nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
+            )
         else:
             # Mirror conv downsampling settings.
             # For the auto kernel above, output_padding=0 gives exact scale-up by stride.
             padding = (kernel - stride) // 2
             output_padding = 0 if auto_kernel else (stride % 2)
-            self.sample = nn.ConvTranspose1d(
-                in_ch, out_ch, kernel_size=kernel, stride=stride,
-                padding=padding, output_padding=output_padding
+            self.sample = nn.utils.weight_norm(
+                nn.ConvTranspose1d(
+                    in_ch, out_ch, kernel_size=kernel, stride=stride,
+                    padding=padding, output_padding=output_padding
+                )
             )
-        # For waveform output layer (decoder last block, out_ch=1), avoid LN+activation:
-        # LayerNorm(1) collapses temporal variation to a near-constant affine output.
+
+        # HiFi-Codec encoder uses GroupNorm after stage blocks; for this simpler block,
+        # we place GroupNorm after the sampling conv only on the encoder path.
         self.apply_sample_post = not (transpose and out_ch == 1)
-        self.sample_norm = nn.LayerNorm(out_ch) if self.apply_sample_post else nn.Identity()
+        if transpose:
+            self.sample_norm = nn.Identity()
+            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
+        else:
+            groups = max(1, out_ch // 16)
+            self.sample_norm = nn.GroupNorm(groups, out_ch, eps=1e-6, affine=True)
+            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, C_in, T]
-        r = self.res_conv1(x)
-        r = self.act(self.res_norm1(r.transpose(1, 2)).transpose(1, 2))
-        r = self.res_conv2(r)
-        r = self.res_norm2(r.transpose(1, 2)).transpose(1, 2)
-        x = self.act(r + x)
+        r = self.res_conv1(self.act(x))
+        r = self.res_conv2(self.act(r))
+        x = r + x
 
         x = self.sample(x)
         if self.apply_sample_post:
-            x = self.act(self.sample_norm(x.transpose(1, 2)).transpose(1, 2))
+            x = self.sample_norm(x)
+            x = self.sample_act(x)
         return x
 
 class SpeechEncoder(nn.Module):
@@ -99,7 +113,7 @@ class SpeechEncoder(nn.Module):
         ])
         self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
         # 论文描述为末端 1D Conv(kernel=7, out_channels=512)；padding=3 以保持时序长度
-        self.proj = nn.Conv1d(hidden * 2, hidden, kernel_size=7, padding=3) 
+        self.proj = nn.utils.weight_norm(nn.Conv1d(hidden * 2, hidden, kernel_size=7, padding=3))
     
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         # wav: [B, 1, T]
@@ -231,7 +245,7 @@ class Decoder(nn.Module):
         # Decoder 顺序：Proj_inv -> LSTM -> ConvBlocks_inv
         
         # 1. 镜像 Encoder 的 Proj 层 (kernel=7)
-        self.proj_in = nn.Conv1d(hidden, hidden * 2, kernel_size=7, padding=3)
+        self.proj_in = nn.utils.weight_norm(nn.Conv1d(hidden, hidden * 2, kernel_size=7, padding=3))
         
         # 2. 镜像 Encoder 的 LSTM 层 (hidden * 2 -> hidden)
         # 因为是双向，所以每向维度是 hidden // 2

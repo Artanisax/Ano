@@ -30,21 +30,21 @@ training:
   batch_size: 20
   max_steps: 500000
   max_epochs: 10
-  lr: 1.0e-4
-  gamma: 0.9
+  lr: 1.25e-4
+  gamma: 0.7
   betas: [0.8, 0.999]
-  weight_decay: 1.25e-5
+  weight_decay: 1.0e-5
   train_num_workers: 20
   val_num_workers: 20
   precision: "bf16"
   target_samples: 96000
   # val_check_interval: 0.001
-  val_check_interval: 0.1
-  early_stop_patience: 10
+  val_check_interval: 0.2
+  early_stop_patience: 5
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
   # log_every_n_steps: 10
-  log_every_n_steps: 100
+  log_every_n_steps: 250
 
 losses:
   lambda_r: 45.0
@@ -56,6 +56,7 @@ losses:
   lambda_e_chroma: 1.0
   lambda_mrstft: 1.0
   mrstft_resolutions:
+    - [2048, 320, 1280]
     - [1024, 160, 640]
     - [512, 80, 320]
     - [256, 40, 160]

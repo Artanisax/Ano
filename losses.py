@@ -21,15 +21,34 @@ class LinDistillLoss(nn.Module):
         return F.cross_entropy(self.proj(q1).transpose(1, 2), tokens.long())
 
 class EmoDistillLoss(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, f0_type: str = "log"):
         super().__init__()
+        self.f0_type = f0_type
         self.proj = nn.Linear(dim, 1)
         with torch.no_grad():
-            self.proj.bias.fill_(5.0)
+            if self.f0_type == "log":
+                self.proj.bias.fill_(5.0)
+            else:
+                self.proj.bias.fill_(150.0)
     
-    def forward(self, q2: torch.Tensor, f0_log: torch.Tensor) -> torch.Tensor:
+    def forward(self, q2: torch.Tensor, f0: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2).squeeze(-1)
-        return F.mse_loss(pred, f0_log)
+        if self.f0_type == "log":
+            return F.mse_loss(pred, f0)
+        else: # "abs"
+            # Cosine embedding loss expects target to be 1 or -1
+            # To measure similarity between two 1D sequences, we use cosine similarity along time dimension
+            # or treat them as vectors and compute cosine similarity
+            # but usually F0 is just a scalar sequence.
+            # Using cosine similarity on scalars is just sign(x) * sign(y), which is not useful for F0.
+            # If the paper implies Cosine Loss for "abs" F0, it might mean computing cosine similarity 
+            # between the predicted and target F0 vectors (shape [B, T]).
+            # Let's implement cosine loss along the sequence dimension T.
+            
+            # cosine_similarity expects [B, T], output [B]
+            cos_sim = F.cosine_similarity(pred, f0, dim=-1)
+            # Loss is 1 - cos_sim
+            return (1.0 - cos_sim).mean()
 
 class ChromaDistillLoss(nn.Module):
     def __init__(self, dim: int, n_chroma: int = 24):

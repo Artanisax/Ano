@@ -42,12 +42,19 @@ class AnonSystem(pl.LightningModule):
         # 损失函数
         self.l_spk = SpkDistillLoss(cfg['model']['speaker']['dim'], num_speakers)
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], cfg['model']['bottleneck']['codebook_dim'])
-        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'])
-        self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)
+        
+        self.f0_type = cfg['losses'].get('f0_type', 'log')
+        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'], f0_type=self.f0_type)
+        
+        self.enable_chroma = cfg['losses'].get('enable_chroma', True)
+        if self.enable_chroma:
+            self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)
         
         # ✅ 从 cfg 读取 MR-STFT 配置（支持消融实验）
-        mrstft_resolutions = cfg['losses'].get('mrstft_resolutions')
-        self.l_mrstft = MultiResolutionSTFTLoss(resolutions=mrstft_resolutions)
+        self.enable_mrstft = cfg['losses'].get('enable_mrstft', True)
+        if self.enable_mrstft:
+            mrstft_resolutions = cfg['losses'].get('mrstft_resolutions')
+            self.l_mrstft = MultiResolutionSTFTLoss(resolutions=mrstft_resolutions)
         self.l_adv = AdvLoss()
         
         self.automatic_optimization = False
@@ -138,7 +145,7 @@ class AnonSystem(pl.LightningModule):
         mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]
  
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
-        l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1))
+        l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
         
         # ───────── 2. 蒸馏损失 ─────────
         l_spk = self.l_spk(spk1, spk2, spk_ids)
@@ -146,7 +153,7 @@ class AnonSystem(pl.LightningModule):
         l_emo_f0 = self.l_emo(q2, f0_main)
         chroma_batch = batch.get('chroma')
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
-        l_emo_chroma = self.l_chroma(q2, chroma_main) if chroma_main is not None else torch.tensor(0.0, device=wav.device)
+        l_emo_chroma = self.l_chroma(q2, chroma_main) if (self.enable_chroma and chroma_main is not None) else torch.tensor(0.0, device=wav.device)
         
         # ───────── 3. 对抗损失（显存优化版） ─────────
         # 3.1 生成器步：冻结判别器参数，仅保留到 wav_rec 的梯度链路
@@ -221,14 +228,17 @@ class AnonSystem(pl.LightningModule):
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
         
         # ───────── 2. MR-STFT 损失（剔除 Padding 区域） ─────────
-        if 'lengths' in batch:
-            valid_len = int(batch['lengths'].min().item())
+        if self.enable_mrstft:
+            if 'lengths' in batch:
+                valid_len = int(batch['lengths'].min().item())
+            else:
+                valid_len = min(wav_rec.shape[-1], wav.shape[-1])
+            l_mrstft = self.l_mrstft(
+                wav_rec[:, :valid_len],
+                wav[:, 0, :valid_len]
+            )
         else:
-            valid_len = min(wav_rec.shape[-1], wav.shape[-1])
-        l_mrstft = self.l_mrstft(
-            wav_rec[:, :valid_len],
-            wav[:, 0, :valid_len]
-        )
+            l_mrstft = torch.tensor(0.0, device=wav.device)
         
         # ───────── 3. 日志记录 ─────────
         bs = self.cfg['training']['batch_size']

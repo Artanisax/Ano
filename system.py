@@ -263,16 +263,19 @@ class AnonSystem(pl.LightningModule):
     def configure_optimizers(self):
         g_p = [p for n, p in self.named_parameters() if 'disc' not in n]
         
+        lr_g = self.cfg['training'].get('lr_g', 1.25e-4)
+        lr_d = self.cfg['training'].get('lr_d', 1.25e-4)
+        
         opt_g = torch.optim.AdamW(
             g_p, 
-            lr=self.cfg['training']['lr'], 
+            lr=lr_g, 
             betas=self.cfg['training']['betas'],
             weight_decay=self.cfg['training']['weight_decay']
         )
         
         opt_d = torch.optim.AdamW(
             self.disc.parameters(), 
-            lr=self.cfg['training']['lr'],
+            lr=lr_d,
             betas=self.cfg['training']['betas'],
             weight_decay=self.cfg['training']['weight_decay']
         )

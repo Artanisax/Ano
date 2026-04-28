@@ -30,7 +30,8 @@ training:
   batch_size: 20
   max_steps: 500000
   max_epochs: 10
-  lr: 1.25e-4
+  lr_g: 1.25e-4
+  lr_d: 1.25e-4
   gamma: 0.7
   betas: [0.8, 0.99]
   weight_decay: 1.0e-5

@@ -15,7 +15,7 @@ class VPDataset(Dataset):
         self.use_cache = cfg['data']['use_cache']
         self.f0_dir, self.tok_dir = cfg['data']['f0_dir'], cfg['data']['token_dir']
         
-        MIN_DURATION_SEC = 2.0
+        MIN_DURATION_SEC = cfg['data'].get('min_duration_sec', 2.0)
         MIN_SAMPLES = int(MIN_DURATION_SEC * cfg['model']['sample_rate'])
         
         # ───────── 1. 预扫描：统计有效行数（用于进度条总数） ─────────

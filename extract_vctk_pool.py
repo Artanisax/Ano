@@ -66,12 +66,10 @@ def main():
         raise RuntimeError("❌ 未提取到任何说话人向量，请检查 VCTK 目录结构或音频格式")
         
     pool = torch.stack(speaker_vectors)
-    # ✅ L2 归一化确保匿名化插值尺度稳定（论文 §3.4）
-    pool = F.normalize(pool, dim=1, p=2)
     
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     torch.save(pool, args.output)
-    print(f"💾 说话人池已保存: {pool.shape} | 已 L2 归一化")
+    print(f"💾 说话人池已保存: {pool.shape}")
 
 if __name__ == "__main__":
     main()

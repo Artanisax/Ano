@@ -33,7 +33,13 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         n_select = min(num_candidates, vctk_pool.size(0))
         pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:n_select]
         s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True).view(1, -1)
+        
+        # 根据经验分布生成 s_hat，防止高斯白噪声数值主导
+        pool_mean = vctk_pool.mean(dim=0, keepdim=True)
+        pool_std = vctk_pool.std(dim=0, keepdim=True)
         s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
+        s_hat = s_hat * pool_std + pool_mean
+        
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
         
         recon_anon = recon + s_anon.unsqueeze(1)
@@ -76,9 +82,6 @@ def main():
     
     print(f"🔹 加载说话人池: {cfg['anonymization']['vctk_pool_path']}")
     vctk_pool = torch.load(cfg['anonymization']['vctk_pool_path'], map_location=args.device)
-    # 防御性归一化
-    if vctk_pool.dim() == 2:
-        vctk_pool = F.normalize(vctk_pool, dim=1, p=2)
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
     num_candidates = args.num_candidates

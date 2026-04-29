@@ -82,16 +82,16 @@ class AnonSystem(pl.LightningModule):
                           sr=self.cfg['model']['sample_rate'], **mel_params).squeeze(1)
 
     def forward(self, wav: torch.Tensor) -> tuple:
-        # 分段批次: [B, N, 1, T]，其中训练 N=3，验证 N=2
+        # 分段批次: [B, N, 1, T]，其中训练和验证 N=3
         is_segment_batch = wav.dim() == 4
 
         if is_segment_batch:
             wav_main = wav[:, 0]
-            wav_s1 = wav[:, 1] if wav.shape[1] > 1 else None
-            wav_s2 = wav[:, 2] if wav.shape[1] > 2 else None
+            wav_s1 = wav[:, 1] if wav.shape[1] > 1 else wav_main
+            wav_s2 = wav[:, 2] if wav.shape[1] > 2 else wav_main
         else:
             wav_main = wav
-            wav_s1 = wav_s2 = None
+            wav_s1 = wav_s2 = wav
         
         # ───────── 主重建路径 ─────────
         mel_params = get_stft_params(self.cfg, prefix='mel')
@@ -100,42 +100,26 @@ class AnonSystem(pl.LightningModule):
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
         spk_main = self.spk_enc(mel_main_4d)            # [B, 512]
 
-        if wav_s1 is not None:
-            mel_s1_4d = compute_mel(
-                wav_s1,
-                self.cfg['model']['n_mels'],
-                self.cfg['model']['sample_rate'],
-                **mel_params,
-            )
-            spk_src = self.spk_enc(mel_s1_4d)           # [B, 512]
-        else:
-            spk_src = spk_main
+        mel_s1_4d = compute_mel(wav_s1, self.cfg['model']['n_mels'],
+                                self.cfg['model']['sample_rate'], **mel_params)
+        spk_s1 = self.spk_enc(mel_s1_4d)           # [B, 512]
+        
+        mel_s2_4d = compute_mel(wav_s2, self.cfg['model']['n_mels'],
+                                self.cfg['model']['sample_rate'], **mel_params)
+        spk_s2 = self.spk_enc(mel_s2_4d)           # [B, 512]
         
         # 使用 s1 作为跨片段的说话人身份源，避免退化成当前片段条件向量捷径
-        r1 = feat_main - spk_src.unsqueeze(1)           # [B, T_feat, 512]
+        r1 = feat_main - spk_s1.unsqueeze(1)           # [B, T_feat, 512]
         recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
         
-        recon_with_spk = recon + spk_src.unsqueeze(1)   # [B, T_feat, 512]
+        recon_with_spk = recon + spk_s1.unsqueeze(1)   # [B, T_feat, 512]
         wav_rec = self.dec(recon_with_spk)  # [B, T_feat, hidden] -> [B, T]
         
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:
             wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
-        if is_segment_batch:
-            if wav_s2 is not None:
-                mel_s2_4d = compute_mel(
-                    wav_s2,
-                    self.cfg['model']['n_mels'],
-                    self.cfg['model']['sample_rate'],
-                    **mel_params,
-                )
-                spk_other = self.spk_enc(mel_s2_4d)
-                return wav_rec, spk_src, spk_other, q1, q2, com
-
-            return wav_rec, spk_main, spk_src, q1, q2, com
-
-        return wav_rec, spk_src, spk_src, q1, q2, com
+        return wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com
 
     def training_step(self, batch: dict, batch_idx: int):
         opt_g, opt_d = self.optimizers()
@@ -149,7 +133,7 @@ class AnonSystem(pl.LightningModule):
             tokens = self.get_tokens_dynamic(wav[:, 0])
             
         # 前向传播
-        wav_rec, spk1, spk2, q1, q2, com = self(wav)
+        wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com = self(wav)
         
         # ───────── 1. 重建损失 ─────────
         mel_gt = self._compute_mel_3d(wav[:, 0])
@@ -162,7 +146,7 @@ class AnonSystem(pl.LightningModule):
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
         
         # ───────── 2. 蒸馏损失 ─────────
-        l_spk = self.l_spk(spk1, spk2, spk_ids)
+        l_spk = self.l_spk(spk_s1, spk_s2, spk_ids)
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
         chroma_batch = batch.get('chroma')
@@ -229,7 +213,7 @@ class AnonSystem(pl.LightningModule):
         )
 
     def validation_step(self, batch: dict, batch_idx: int):
-        wav = batch['wav']  # [B, 2, 1, T]
+        wav = batch['wav']  # [B, 3, 1, T]
         f0_main = batch['f0'][:, 0]
         tok_main = batch.get('tok')
         tokens = tok_main[:, 0] if tok_main is not None else None
@@ -238,7 +222,7 @@ class AnonSystem(pl.LightningModule):
         if not self.use_cache:
             tokens = self.get_tokens_dynamic(wav[:, 0])
 
-        wav_rec, spk1, spk2, q1, q2, com = self(wav)
+        wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com = self(wav)
 
         mel_gt = self._compute_mel_3d(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
@@ -247,7 +231,7 @@ class AnonSystem(pl.LightningModule):
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
 
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
-        l_spk = self.l_spk(spk1, spk2, spk_ids)
+        l_spk = self.l_spk(spk_s1, spk_s2, spk_ids)
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
         chroma_batch = batch.get('chroma')

@@ -67,6 +67,9 @@ class VPDataset(Dataset):
         last_start = (mx // self.S) * self.S
         if num_segments == 2:
             return [0, last_start]
+        elif num_segments == 3:
+            mid_start = (mx // 2 // self.S) * self.S
+            return [0, mid_start, last_start]
 
         return [0 for _ in range(num_segments - 1)] + [last_start]
 
@@ -113,7 +116,7 @@ class VPDataset(Dataset):
         tok_path = os.path.join(self.tok_dir, f"{uid}.npy")
         tok_full = torch.tensor(np.load(tok_path), dtype=torch.long) if (self.use_cache and os.path.exists(tok_path)) else None
 
-        num_segments = 3 if self.training else 2
+        num_segments = 3
         starts = self._get_segment_starts(wav.shape[-1], num_segments)
         ends = [s + self.T for s in starts]
 

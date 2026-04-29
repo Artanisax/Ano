@@ -1,10 +1,9 @@
 salloc \
     -p titan \
     --qos titan \
-    --nodelist titanrtx01 \
-    -c25 \
+    -c16 \
     --mem=64G \
-    --gres=gpu:4 \
+    --gres=gpu:1 \
     -n1
 
 salloc \

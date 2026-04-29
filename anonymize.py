@@ -42,6 +42,11 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
         
+        # --- 缩放 s_anon 使其与 s_orig 的模长(L2 Norm)一致 ---
+        s_orig_norm = torch.linalg.vector_norm(s_orig, dim=-1, keepdim=True)
+        s_anon_norm = torch.linalg.vector_norm(s_anon, dim=-1, keepdim=True)
+        s_anon = s_anon * (s_orig_norm / (s_anon_norm + 1e-8))
+        
         recon_anon = recon + s_anon.unsqueeze(1)
         wav_anon = model.dec(recon_anon)
         

@@ -160,9 +160,12 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
 def main():
     parser = argparse.ArgumentParser(description="生成 VPC 2024 评测所需的匿名化音频")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
-    parser.add_argument('--vpc_data_dir', default='/lab/wangzq_lab/12531312/CKR/Voice-Privacy-Challenge-2024/data', 
+    parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
+    parser.add_argument('--vpc_data_dir', default='../Voice-Privacy-Challenge-2024/data', 
                         help='VPC2024 data 目录的路径 (包含 libri_dev, libri_test 等)')
-    parser.add_argument('--out_dir', default='/lab/wangzq_lab/12531312/CKR/Voice-Privacy-Challenge-2024/data', 
+    parser.add_argument('--out_dir',
+                        default='outputs',  
+                        # default='../Voice-Privacy-Challenge-2024/data', 
                         help='生成音频的输出根目录 (默认同为 VPC data 目录)')
     parser.add_argument('--anon_suffix', default='_npu', 
                         help='匿名化数据集后缀名，例如 _npu 将生成 libri_dev_npu')
@@ -188,10 +191,10 @@ def main():
     ).to(args.device)
     model.eval()
     
-    vctk_pool_path = cfg['anonymization']['vctk_pool_path']
-    if not Path(vctk_pool_path).exists():
-        raise FileNotFoundError(f"找不到说话人池文件: {vctk_pool_path}")
-    vctk_pool = torch.load(vctk_pool_path, map_location=args.device)
+    print(f"🔹 加载说话人池: {args.pool}")
+    if not Path(args.pool).exists():
+        raise FileNotFoundError(f"❌ 找不到说话人池文件: {args.pool}")
+    vctk_pool = torch.load(args.pool, map_location=args.device)
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
     num_candidates = args.num_candidates if args.num_candidates is not None else cfg['anonymization'].get('num_candidates', 20)

@@ -27,6 +27,7 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         
         # ───────── 3. 重建输出：加回原始身份 ─────────
         recon_rec = recon + s_orig.unsqueeze(1)
+        # recon_rec = recon
         wav_rec = model.dec(recon_rec)
         
         # ───────── 4. 匿名化输出：加回匿名身份 (论文 Eq.7) ─────────
@@ -55,8 +56,9 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
 def main():
     parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建 + 匿名)")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
+    parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
     parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
-    parser.add_argument('--output', default='outputs', help='输出目录路径')
+    parser.add_argument('--output', default='outputs/Ano', help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用 configs.yaml')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
@@ -85,8 +87,10 @@ def main():
     ).to(args.device)
     model.eval()
     
-    print(f"🔹 加载说话人池: {cfg['anonymization']['vctk_pool_path']}")
-    vctk_pool = torch.load(cfg['anonymization']['vctk_pool_path'], map_location=args.device)
+    print(f"🔹 加载说话人池: {args.pool}")
+    if not Path(args.pool).exists():
+        raise FileNotFoundError(f"❌ 找不到说话人池文件: {args.pool}")
+    vctk_pool = torch.load(args.pool, map_location=args.device)
         
     alpha = cfg['anonymization'][f'alpha_cond{args.condition}']
     num_candidates = args.num_candidates

@@ -161,16 +161,23 @@ def main():
     parser = argparse.ArgumentParser(description="生成 VPC 2024 评测所需的匿名化音频")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
     parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
-    parser.add_argument('--vpc_data_dir', default='../Voice-Privacy-Challenge-2024/data', 
+    parser.add_argument('--vpc_data_dir', default='data', 
                         help='VPC2024 data 目录的路径 (包含 libri_dev, libri_test 等)')
     parser.add_argument('--out_dir',
-                        default='outputs',  
+                        default='outputs/',  
                         # default='../Voice-Privacy-Challenge-2024/data', 
-                        help='生成音频的输出根目录 (默认同为 VPC data 目录)')
-    parser.add_argument('--anon_suffix', default='_npu', 
-                        help='匿名化数据集后缀名，例如 _npu 将生成 libri_dev_npu')
+                        help='生成音频的输出根目录')
+    parser.add_argument('--anon_suffix', default='_ours', 
+                        help='匿名化数据集后缀名，例如 _ours 将生成 libri_dev_ours')
     parser.add_argument('--datasets', nargs='+', 
-                        default=['libri_dev', 'libri_test', 'IEMOCAP_dev', 'IEMOCAP_test'], 
+                        default=[
+                            'libri_dev_trials_f', 
+                            'libri_dev_trials_m', 
+                            'libri_test_trials_f', 
+                            'libri_test_trials_m', 
+                            'IEMOCAP_dev', 
+                            'IEMOCAP_test'
+                        ], 
                         help='需要处理的 VPC 数据集名称列表')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数')
@@ -200,8 +207,9 @@ def main():
     num_candidates = args.num_candidates if args.num_candidates is not None else cfg['anonymization'].get('num_candidates', 20)
     
     print(f"✅ 模型就绪 | Condition {args.condition} (α={alpha}) | Candidates: {num_candidates} | Device: {args.device}")
-
+    
     # ───────── 2. 遍历并处理各个数据集 ─────────
+    os.chdir("../Voice-Privacy-Challenge-2024")
     vpc_data_dir = Path(args.vpc_data_dir)
     
     for dataset_name in args.datasets:

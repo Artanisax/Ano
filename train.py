@@ -80,6 +80,7 @@ def main():
         callbacks=[
             ModelCheckpoint(
                 dirpath=ckpt_dir,
+                save_last=True,
                 save_top_k=5,
                 monitor=cfg['training']['early_stop_monitor'],
                 mode="min",

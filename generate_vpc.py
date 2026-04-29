@@ -169,12 +169,15 @@ def main():
                         help='匿名化数据集后缀名，例如 _ours 将生成 libri_dev_ours')
     parser.add_argument('--datasets', nargs='+', 
                         default=[
+                            'libri_dev_enrolls', 
                             'libri_dev_trials_f', 
                             'libri_dev_trials_m', 
+                            'libri_test_enrolls', 
                             'libri_test_trials_f', 
                             'libri_test_trials_m', 
                             'IEMOCAP_dev', 
-                            'IEMOCAP_test'
+                            'IEMOCAP_test', 
+                            'train-clean-360'
                         ], 
                         help='需要处理的 VPC 数据集名称列表')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')

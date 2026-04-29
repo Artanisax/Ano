@@ -127,9 +127,7 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
             out_wav_path = out_wav_dir / f"{utid}.wav"
             
             # 使用官方类似的处理方式加载音频
-            wav = load_wav_from_scp(wav_path_or_cmd).to(device)
-            if wav.dim() == 1:
-                wav = wav.unsqueeze(0)
+            wav = load_wav_from_scp(wav_path_or_cmd).to(device).unsqueeze(0)
             
             # 长度保护
             orig_len = wav.shape[-1]

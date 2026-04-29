@@ -82,15 +82,15 @@ class AnonSystem(pl.LightningModule):
                           sr=self.cfg['model']['sample_rate'], **mel_params).squeeze(1)
 
     def forward(self, wav: torch.Tensor) -> tuple:
-        # 训练期: [B, 3, 1, T] | 验证期: [B, 1, T]
-        is_train = wav.dim() == 4
-        
-        if is_train:
-            wav_main = wav[:, 0]   # [B, 1, T] 主重建路径
-            wav_s1   = wav[:, 1]   # [B, 1, T] 蒸馏参考1
-            wav_s2   = wav[:, 2]   # [B, 1, T] 蒸馏参考2
+        # 分段批次: [B, N, 1, T]，其中训练 N=3，验证 N=2
+        is_segment_batch = wav.dim() == 4
+
+        if is_segment_batch:
+            wav_main = wav[:, 0]
+            wav_s1 = wav[:, 1] if wav.shape[1] > 1 else None
+            wav_s2 = wav[:, 2] if wav.shape[1] > 2 else None
         else:
-            wav_main = wav         # [B, 1, T] 验证期直接保留
+            wav_main = wav
             wav_s1 = wav_s2 = None
         
         # ───────── 主重建路径 ─────────
@@ -99,29 +99,43 @@ class AnonSystem(pl.LightningModule):
                                   self.cfg['model']['sample_rate'], **mel_params)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
         spk_main = self.spk_enc(mel_main_4d)            # [B, 512]
+
+        if wav_s1 is not None:
+            mel_s1_4d = compute_mel(
+                wav_s1,
+                self.cfg['model']['n_mels'],
+                self.cfg['model']['sample_rate'],
+                **mel_params,
+            )
+            spk_src = self.spk_enc(mel_s1_4d)           # [B, 512]
+        else:
+            spk_src = spk_main
         
-        # ✅ 串行解耦：减去原始说话人身份（论文 §3.1, Figure 1）
-        r1 = feat_main - spk_main.unsqueeze(1)          # [B, T_feat, 512]
+        # 使用 s1 作为跨片段的说话人身份源，避免退化成当前片段条件向量捷径
+        r1 = feat_main - spk_src.unsqueeze(1)           # [B, T_feat, 512]
         recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
         
-        # 🔑 核心修复：加回原始身份用于重建（严格对齐论文 §3.4 & Eq.7）
-        recon_with_spk = recon + spk_main.unsqueeze(1)  # [B, T_feat, 512]
+        recon_with_spk = recon + spk_src.unsqueeze(1)   # [B, T_feat, 512]
         wav_rec = self.dec(recon_with_spk)  # [B, T_feat, hidden] -> [B, T]
         
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:
             wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
-        if is_train:
-            # ───────── 蒸馏路径：仅提取 s1, s2 用于说话人一致性约束 ─────────
-            mel_s1_4d = compute_mel(wav_s1, self.cfg['model']['n_mels'],
-                                    self.cfg['model']['sample_rate'], **mel_params)
-            mel_s2_4d = compute_mel(wav_s2, self.cfg['model']['n_mels'],
-                                    self.cfg['model']['sample_rate'], **mel_params)
-            spk1 = self.spk_enc(mel_s1_4d)  # [B, 512]
-            spk2 = self.spk_enc(mel_s2_4d)  # [B, 512]
-            return wav_rec, spk1, spk2, q1, q2, com
-        return wav_rec, spk_main, spk_main, q1, q2, com
+        if is_segment_batch:
+            if wav_s2 is not None:
+                mel_s2_4d = compute_mel(
+                    wav_s2,
+                    self.cfg['model']['n_mels'],
+                    self.cfg['model']['sample_rate'],
+                    **mel_params,
+                )
+                spk_other = self.spk_enc(mel_s2_4d)
+                return wav_rec, spk_src, spk_other, q1, q2, com
+
+            return wav_rec, spk_main, spk_src, q1, q2, com
+
+        return wav_rec, spk_src, spk_src, q1, q2, com
 
     def training_step(self, batch: dict, batch_idx: int):
         opt_g, opt_d = self.optimizers()
@@ -215,41 +229,75 @@ class AnonSystem(pl.LightningModule):
         )
 
     def validation_step(self, batch: dict, batch_idx: int):
-        wav = batch['wav']  # [B, 1, T_max]
-        wav_rec, _, _, _, _, _ = self(wav)
-        
-        # ───────── 1. Mel 重建损失 ─────────
-        mel_gt = self._compute_mel_3d(wav)
+        wav = batch['wav']  # [B, 2, 1, T]
+        f0_main = batch['f0'][:, 0]
+        tok_main = batch.get('tok')
+        tokens = tok_main[:, 0] if tok_main is not None else None
+        spk_ids = batch['spk_ids']
+
+        if not self.use_cache:
+            tokens = self.get_tokens_dynamic(wav[:, 0])
+
+        wav_rec, spk1, spk2, q1, q2, com = self(wav)
+
+        mel_gt = self._compute_mel_3d(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
-        if mel_rec.shape[-1] != mel_gt.shape[-1]:
-            raise RuntimeError(
-                f"Validation mel 帧数不一致: mel_rec={mel_rec.shape[-1]}, mel_gt={mel_gt.shape[-1]}"
-            )
+        T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
+        mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
-        
-        # ───────── 2. MR-STFT 损失（剔除 Padding 区域） ─────────
-        if self.enable_mrstft:
-            if 'lengths' in batch:
-                valid_len = int(batch['lengths'].min().item())
-            else:
-                valid_len = min(wav_rec.shape[-1], wav.shape[-1])
-            l_mrstft = self.l_mrstft(
-                wav_rec[:, :valid_len],
-                wav[:, 0, :valid_len]
-            )
-        else:
-            l_mrstft = torch.tensor(0.0, device=wav.device)
-        
-        # ───────── 3. 日志记录 ─────────
-        bs = self.cfg['training']['batch_size']
-        self.log('val/rec', l_rec, prog_bar=True, batch_size=bs)
-        self.log('val/mrstft', l_mrstft, prog_bar=False, batch_size=bs)
-        
-        # ───────── 4. 音频日志 ─────────
+
+        l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
+        l_spk = self.l_spk(spk1, spk2, spk_ids)
+        l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
+        l_emo_f0 = self.l_emo(q2, f0_main)
+        chroma_batch = batch.get('chroma')
+        chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
+        l_emo_chroma = self.l_chroma(q2, chroma_main) if (self.enable_chroma and chroma_main is not None) else torch.tensor(0.0, device=wav.device)
+
+        y_dr, y_dg, f_r, f_g = self.disc(wav[:, 0], wav_rec.unsqueeze(1), return_fmaps=True)
+        l_adv_g, l_adv_g_adv, l_adv_g_fm = self.l_adv(
+            y_dg, y_dr, f_g, f_r, 'gen', return_components=True
+        )
+        y_dr_d, y_dg_d, _, _ = self.disc(wav[:, 0], wav_rec.unsqueeze(1), return_fmaps=False)
+        l_adv_d, l_adv_d_real, l_adv_d_fake = self.l_adv(
+            y_dg_d, y_dr_d, [], [], 'disc', return_components=True
+        )
+
+        total = (self.cfg['losses']['lambda_r'] * l_rec +
+                 self.cfg['losses']['lambda_a'] * l_adv_g +
+                 self.cfg['losses']['lambda_c'] * com +
+                 self.cfg['losses']['lambda_s'] * l_spk +
+                 self.cfg['losses']['lambda_l'] * l_lin +
+                 self.cfg['losses']['lambda_e_f0'] * l_emo_f0 +
+                 self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
+                 self.cfg['losses']['lambda_mrstft'] * l_mrstft)
+
+        bs = wav.shape[0]
+        self.log_dict(
+            {
+                'val/loss': total,
+                'val/rec': l_rec,
+                'val/mrstft': l_mrstft,
+                'val/adv_g': l_adv_g,
+                'val/adv_g_adv': l_adv_g_adv,
+                'val/adv_g_fm': l_adv_g_fm,
+                'val/adv_d': l_adv_d,
+                'val/adv_d_real': l_adv_d_real,
+                'val/adv_d_fake': l_adv_d_fake,
+                'val/com': com,
+                'val/spk': l_spk,
+                'val/lin': l_lin,
+                'val/emo_f0': l_emo_f0,
+                'val/emo_chroma': l_emo_chroma,
+            },
+            prog_bar=True,
+            batch_size=bs,
+        )
+
         if self.global_rank == 0 and batch_idx == 0:
             sr = self.cfg['model']['sample_rate']
             step = self.global_step
-            orig = normalize_audio(wav[0, 0].detach().cpu().unsqueeze(0))
+            orig = normalize_audio(wav[0, 0, 0].detach().cpu().unsqueeze(0))
             rec = normalize_audio(wav_rec[0].detach().cpu().unsqueeze(0))
             self.logger.experiment.add_audio('val/original', orig, step, sr)
             self.logger.experiment.add_audio('val/reconstructed', rec, step, sr)

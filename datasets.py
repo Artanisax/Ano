@@ -56,6 +56,36 @@ class VPDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
+    def _get_segment_starts(self, wav_len: int, num_segments: int) -> list:
+        mx = max(0, wav_len - self.T)
+        if self.training:
+            return [(random.randint(0, mx) // self.S) * self.S for _ in range(num_segments)]
+
+        if mx == 0:
+            return [0 for _ in range(num_segments)]
+
+        last_start = (mx // self.S) * self.S
+        if num_segments == 2:
+            return [0, last_start]
+
+        return [0 for _ in range(num_segments - 1)] + [last_start]
+
+    def _slice_1d_feature(self, feat: torch.Tensor, start: int, end: int, pad_value: float) -> torch.Tensor:
+        seg = feat[start:end]
+        if seg.shape[0] < self.target_frames:
+            seg = F.pad(seg, (0, self.target_frames - seg.shape[0]), value=pad_value)
+        else:
+            seg = seg[:self.target_frames]
+        return seg
+
+    def _slice_2d_feature(self, feat: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        seg = feat[start:end]
+        if seg.shape[0] < self.target_frames:
+            seg = F.pad(seg, (0, 0, 0, self.target_frames - seg.shape[0]), value=0)
+        else:
+            seg = seg[:self.target_frames]
+        return seg
+
     def __getitem__(self, idx: int) -> dict:
         e = self.entries[idx]
         wav = load_audio(e['wav'])
@@ -82,72 +112,49 @@ class VPDataset(Dataset):
         # Token 加载
         tok_path = os.path.join(self.tok_dir, f"{uid}.npy")
         tok_full = torch.tensor(np.load(tok_path), dtype=torch.long) if (self.use_cache and os.path.exists(tok_path)) else None
-        
-        if self.training:
-            mx = max(0, wav.shape[-1] - self.T)
-            starts = [(random.randint(0, mx) // self.S) * self.S for _ in range(3)]
-            ends = [s + self.T for s in starts]
-            
-            # F0/Chroma/Token 对齐逻辑
-            f0_segments, chroma_segments, tok_segments = [], [], []
-            for i in range(3):
-                fs, fe = starts[i] // self.S, ends[i] // self.S
-                
-                # F0 对齐
-                f0_seg = f0_full[fs:fe]
-                if f0_seg.shape[0] < self.target_frames:
-                    f0_seg = F.pad(f0_seg, (0, self.target_frames - f0_seg.shape[0]), value=np.log(60.0))  # log-F0 兜底
-                else:
-                    f0_seg = f0_seg[:self.target_frames]
-                f0_segments.append(f0_seg)
 
-                # ✅ Chroma 对齐
-                if chroma_full is not None:
-                    c_seg = chroma_full[fs:fe]  # [T_seg, 24]
-                    if c_seg.shape[0] < self.target_frames:
-                        c_seg = F.pad(c_seg, (0, 0, 0, self.target_frames - c_seg.shape[0]), value=0)
-                    else:
-                        c_seg = c_seg[:self.target_frames]
-                    chroma_segments.append(c_seg)
+        num_segments = 3 if self.training else 2
+        starts = self._get_segment_starts(wav.shape[-1], num_segments)
+        ends = [s + self.T for s in starts]
 
-                # Token 对齐
-                if tok_full is not None:
-                    tok_seg = tok_full[fs:fe]
-                    if tok_seg.shape[0] < self.target_frames:
-                        tok_seg = F.pad(tok_seg, (0, self.target_frames - tok_seg.shape[0]), value=0)
-                    else:
-                        tok_seg = tok_seg[:self.target_frames]
-                    tok_segments.append(tok_seg)
+        wav_segments = [wav[:, s:e] for s, e in zip(starts, ends)]
+        f0_segments, chroma_segments, tok_segments = [], [], []
+        for start, end in zip(starts, ends):
+            fs, fe = start // self.S, end // self.S
+            f0_segments.append(self._slice_1d_feature(f0_full, fs, fe, float(np.log(60.0))))
 
-            return {
-                'wav': torch.stack([wav[:, starts[0]:ends[0]], 
-                                    wav[:, starts[1]:ends[1]], 
-                                    wav[:, starts[2]:ends[2]]], dim=0),
-                'f0': torch.stack(f0_segments, dim=0),  # [3, 300]
-                'chroma': torch.stack(chroma_segments, dim=0) if chroma_segments else None,  # [3, 300, 24] ✅
-                'tok': torch.stack(tok_segments, dim=0) if tok_full is not None else None,
-                'spk': e['spk']
-            }
-        return {'wav': wav, 'f0': f0_full, 'chroma': chroma_full, 'tok': tok_full, 'spk': e['spk'], 'uid': uid}
+            if chroma_full is not None:
+                chroma_segments.append(self._slice_2d_feature(chroma_full, fs, fe))
+
+            if tok_full is not None:
+                tok_segments.append(self._slice_1d_feature(tok_full, fs, fe, 0))
+
+        return {
+            'wav': torch.stack(wav_segments, dim=0),
+            'f0': torch.stack(f0_segments, dim=0),
+            'chroma': torch.stack(chroma_segments, dim=0) if chroma_segments else None,
+            'tok': torch.stack(tok_segments, dim=0) if tok_full is not None else None,
+            'spk': e['spk'],
+            'uid': uid,
+        }
 
 def collate_fn(batch: list) -> dict:
-    # 训练模式：已在 __getitem__ 中强制对齐，直接 stack
-    if batch[0]['wav'].dim() == 3:  # 训练模式
+    if batch[0]['wav'].dim() == 3:
         chroma_batch = torch.stack([b['chroma'] for b in batch], dim=0) if batch[0].get('chroma') is not None else None
         return {
             'wav': torch.stack([b['wav'] for b in batch]),
             'f0': torch.stack([b['f0'] for b in batch]),
-            'chroma': chroma_batch,  # ✅ [B, 3, 300, 24]
+            'chroma': chroma_batch,
             'tok': torch.stack([b['tok'] for b in batch]) if batch[0]['tok'] is not None else None,
-            'spk_ids': torch.tensor([b['spk'] for b in batch])
+            'spk_ids': torch.tensor([b['spk'] for b in batch]),
+            'uid': [b.get('uid', '') for b in batch],
         }
-    
-    # 验证/测试模式：动态长度，需对音频做 Padding
+
     lengths = [b['wav'].shape[-1] for b in batch]
     max_len = max(lengths)
-    wav_padded = torch.stack([F.pad(b['wav'], (0, max_len - b['wav'].shape[-1])) for b in batch])  # [B, 1, T_max]
+    wav_padded = torch.stack([F.pad(b['wav'], (0, max_len - b['wav'].shape[-1])) for b in batch])
     return {
-        'wav': wav_padded,              # [B, 1, T_max]
-        'lengths': torch.tensor(lengths),  # [B]
-        'uid': [b.get('uid', '') for b in batch]  # List[B]
+        'wav': wav_padded,
+        'lengths': torch.tensor(lengths),
+        'uid': [b.get('uid', '') for b in batch]
     }

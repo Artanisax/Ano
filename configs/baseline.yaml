@@ -76,8 +76,8 @@ losses:
   lambda_e_chroma: 1.0
   lambda_mrstft: 1.0
   lambda_time_l1: 1.0
-  enable_chroma: false
   f0_type: "log" # "log" or "abs"
+  enable_chroma: false
   enable_mrstft: false
   enable_time_l1: false
   mrstft_resolutions:

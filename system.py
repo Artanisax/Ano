@@ -24,10 +24,10 @@ class AnonSystem(pl.LightningModule):
         self.num_speakers = num_speakers
         
         # 核心编解码模块
-        self.enc = SpeechEncoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'], cfg['model'].get('lstm_layers', 2))
+        self.enc = SpeechEncoder(cfg['model']['seanet'])
         self.spk_enc = SpeakerEncoder({**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']})
         self.bottleneck = ResidualBottleneck(cfg)
-        self.dec = Decoder(cfg['model']['encoder_strides'], cfg['model']['hidden_dim'], cfg['model'].get('lstm_layers', 2))
+        self.dec = Decoder(cfg['model']['seanet'])
         self.disc = Discriminator(cfg.get('discriminator', {}))
         
         # 教师模型按需加载（缓存开启时跳过，节省 ~1.5GB 显存）
@@ -98,7 +98,6 @@ class AnonSystem(pl.LightningModule):
         mel_main_4d = compute_mel(wav_main, self.cfg['model']['n_mels'], 
                                   self.cfg['model']['sample_rate'], **mel_params)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
-        spk_main = self.spk_enc(mel_main_4d)            # [B, 512]
 
         mel_s1_4d = compute_mel(wav_s1, self.cfg['model']['n_mels'],
                                 self.cfg['model']['sample_rate'], **mel_params)
@@ -119,7 +118,7 @@ class AnonSystem(pl.LightningModule):
         if wav_rec.shape[-1] != wav_main.shape[-1]:
             wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
-        return wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com
+        return wav_rec, spk_s1, spk_s2, q1, q2, com
 
     def training_step(self, batch: dict, batch_idx: int):
         opt_g, opt_d = self.optimizers()
@@ -133,7 +132,7 @@ class AnonSystem(pl.LightningModule):
             tokens = self.get_tokens_dynamic(wav[:, 0])
             
         # 前向传播
-        wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com = self(wav)
+        wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
         
         # ───────── 1. 重建损失 ─────────
         mel_gt = self._compute_mel_3d(wav[:, 0])
@@ -225,7 +224,7 @@ class AnonSystem(pl.LightningModule):
         if not self.use_cache:
             tokens = self.get_tokens_dynamic(wav[:, 0])
 
-        wav_rec, spk_main, spk_s1, spk_s2, q1, q2, com = self(wav)
+        wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
 
         mel_gt = self._compute_mel_3d(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))

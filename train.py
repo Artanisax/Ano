@@ -105,7 +105,7 @@ def main():
     tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="Ano")
     ckpt_dir = os.path.join(tb_logger.log_dir, "checkpoints")
     model = AnonSystem(cfg, num_speakers=num_spk)
-    _print_model_size_summary(model)
+    # _print_model_size_summary(model)
 
     # Ensure full and flattened hyperparameters are persisted at training start.
     os.makedirs(tb_logger.log_dir, exist_ok=True)

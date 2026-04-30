@@ -3,8 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from vector_quantize_pytorch import ResidualVQ
 from transformers import WavLMModel
+from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder
+from quantization.core_vq import ResidualVectorQuantization
 
 def get_padding(k: int, d: int = 1) -> int:
     return (k * d - d) // 2
@@ -40,89 +41,33 @@ def norm_conv2d(
 
 LRELU_SLOPE = 0.1
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
-        super().__init__()
-        # HiFi-Codec-like pre-activation residual unit:
-        # no activation-dependent feature normalization inside the block,
-        # use weight norm on convolutions and LeakyReLU nonlinearity.
-        self.res_conv1 = nn.utils.weight_norm(
-            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
-        )
-        self.res_conv2 = nn.utils.weight_norm(
-            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1)
-        )
-        self.act = nn.LeakyReLU(LRELU_SLOPE)
-
-        # Sampling layer:
-        # Use odd kernel for odd stride (k = 2s + 1) so symmetric padding can keep
-        # exact downsample ratio without the 1-frame drift on s=5-like stages.
-        auto_kernel = kernel is None
-        if kernel is None:
-            kernel = 2 * stride + (stride % 2)
-
-        if not transpose:
-            padding = (kernel - stride) // 2
-            self.sample = nn.utils.weight_norm(
-                nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding)
-            )
-        else:
-            # Mirror conv downsampling settings.
-            # For the auto kernel above, output_padding=0 gives exact scale-up by stride.
-            padding = (kernel - stride) // 2
-            output_padding = 0 if auto_kernel else (stride % 2)
-            self.sample = nn.utils.weight_norm(
-                nn.ConvTranspose1d(
-                    in_ch, out_ch, kernel_size=kernel, stride=stride,
-                    padding=padding, output_padding=output_padding
-                )
-            )
-
-        # HiFi-Codec encoder uses GroupNorm after stage blocks; for this simpler block,
-        # we place GroupNorm after the sampling conv only on the encoder path.
-        self.apply_sample_post = not (transpose and out_ch == 1)
-        if transpose:
-            self.sample_norm = nn.Identity()
-            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
-        else:
-            groups = max(1, out_ch // 16)
-            self.sample_norm = nn.GroupNorm(groups, out_ch, eps=1e-6, affine=True)
-            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, C_in, T]
-        r = self.res_conv1(self.act(x))
-        r = self.res_conv2(self.act(r))
-        x = r + x
-
-        x = self.sample(x)
-        if self.apply_sample_post:
-            x = self.sample_norm(x)
-            x = self.sample_act(x)
-        return x
-
 class SpeechEncoder(nn.Module):
-    def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
+    def __init__(self, cfg: dict):
         super().__init__()
-        # 论文描述：Speech Encoder 由 4 个步长卷积层组成，后接 2 层双向 LSTM
-        # 通道数随深度倍增
-        ch = [64, 128, 256, hidden]
-        self.convs = nn.ModuleList([
-            ConvBlock(1 if i == 0 else ch[i-1], c, stride=s) 
-            for i, (c, s) in enumerate(zip(ch, strides))
-        ])
-        self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
-        # 论文描述为末端 1D Conv(kernel=7, out_channels=512)；padding=3 以保持时序长度
-        self.proj = nn.utils.weight_norm(nn.Conv1d(hidden * 2, hidden, kernel_size=7, padding=3))
+        self.model = _SEANetEncoder(
+            channels=cfg.get('channels', 1),
+            dimension=cfg['dimension'],
+            n_filters=cfg.get('n_filters', 32),
+            n_residual_layers=cfg.get('n_residual_layers', 1),
+            ratios=cfg.get('ratios', [8, 5, 4, 2]),
+            activation=cfg.get('activation', 'ELU'),
+            activation_params=cfg.get('activation_params', {'alpha': 1.0}),
+            norm=cfg.get('norm', 'weight_norm'),
+            norm_params=cfg.get('norm_params', {}),
+            kernel_size=cfg.get('kernel_size', 7),
+            last_kernel_size=cfg.get('last_kernel_size', 7),
+            residual_kernel_size=cfg.get('residual_kernel_size', 3),
+            dilation_base=cfg.get('dilation_base', 2),
+            causal=cfg.get('causal', False),
+            pad_mode=cfg.get('pad_mode', 'reflect'),
+            true_skip=cfg.get('true_skip', False),
+            compress=cfg.get('compress', 2),
+            lstm=cfg.get('lstm', 2),
+        )
     
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        # wav: [B, 1, T]
-        x = wav
-        for c in self.convs: 
-            x = c(x)
-        # x: [B, hidden, T_feat]
-        x, _ = self.lstm(x.transpose(1, 2))  # [B, T_feat, hidden*2]
-        return self.proj(x.transpose(1, 2)).transpose(1, 2)  # [B, T_feat, hidden]
+        # Legacy output contract: [B, T_feat, hidden]
+        return self.model(wav).transpose(1, 2)
 
 class Conv1dGLU(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dropout: float):
@@ -210,67 +155,72 @@ class ResidualBottleneck(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         bc = cfg['model']['bottleneck']
-        self.proj_in = nn.Linear(cfg['model']['hidden_dim'], bc['codebook_dim'])
-        self.rvq = ResidualVQ(
-            dim=bc['codebook_dim'], num_quantizers=bc['num_quantizers'],
-            codebook_size=bc['codebook_size'], codebook_dim=bc['codebook_dim'],
-            decay=bc['decay'], commitment_weight=bc['commitment_weight'],
-            use_cosine_sim=bc['use_cosine_sim'], kmeans_init=bc['kmeans_init'],
-            threshold_ema_dead_code=bc['threshold_ema_dead_code']
+        hidden_dim = cfg['model']['seanet']['dimension']
+        self.proj_in = nn.Linear(hidden_dim, bc['codebook_dim'])
+        self.rvq = ResidualVectorQuantization(
+            dim=bc['codebook_dim'],
+            codebook_size=bc['codebook_size'],
+            num_quantizers=bc['num_quantizers'],
+            decay=bc['decay'],
+            kmeans_init=bc['kmeans_init'],
+            threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
+            commitment_weight=bc['commitment_weight'],
         )
-        self.proj_out = nn.Linear(bc['codebook_dim'], cfg['model']['hidden_dim'])
-        self.q1_layer = self.rvq.layers[0]
-        self.q2_layer = self.rvq.layers[1]
-    
+        self.proj_out = nn.Linear(bc['codebook_dim'], hidden_dim)
+
     def forward(self, x: torch.Tensor):
-        # x: [B, T_feat, hidden] → proj_in: [B, T_feat, codebook_dim]
-        h = self.proj_in(x)  # [B, T_feat, codebook_dim]
-        quantized, _, commit_loss = self.rvq(h)  # quantized:[B, T_feat, codebook_dim]
-        com = commit_loss.mean() if commit_loss.dim() > 0 else commit_loss # scalar
-        
-        # 显式提取 q1, q2 用于蒸馏。
-        # Forward 使用离散码本值；backward 采用 straight-through 让蒸馏梯度回传到上游 h。
-        _, idx1, _ = self.q1_layer(h)  # idx1:[B, T_feat]
-        q1_embed = self.q1_layer.codebook[idx1.long()]  # [B, T_feat, codebook_dim]
-        q1 = h + (q1_embed - h).detach()
-        
-        residual_h = h - q1
-        _, idx2, _ = self.q2_layer(residual_h)  # idx2:[B, T_feat]
-        q2_embed = self.q2_layer.codebook[idx2.long()]  # [B, T_feat, codebook_dim]
-        q2 = residual_h + (q2_embed - residual_h).detach()
-        
-        return self.proj_out(quantized), q1, q2, com  # out:[B, T_feat, hidden], q1/q2:[B, T_feat, codebook_dim]
+        # x: [B, T, hidden] -> h_bt:[B, T, D] -> h:[B, D, T]
+        h_bt = self.proj_in(x)
+        h = h_bt.transpose(1, 2)
+
+        quantized_out = 0.0
+        residual = h
+        losses = []
+        quantized_list = []
+
+        for layer in self.rvq.layers:
+            quantized, _, loss = layer(residual)
+            residual = residual - quantized
+            quantized_out = quantized_out + quantized
+            quantized_list.append(quantized)
+            losses.append(loss)
+
+        com = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=x.device)
+        q1 = quantized_list[0].transpose(1, 2)
+        q2 = quantized_list[1].transpose(1, 2) if len(quantized_list) > 1 else torch.zeros_like(q1)
+        out = self.proj_out(quantized_out.transpose(1, 2))
+        return out, q1, q2, com
 
 class Decoder(nn.Module):
-    def __init__(self, strides: list = [2, 4, 5, 8], hidden: int = 512, lstm_layers: int = 2):
+    def __init__(self, cfg: dict):
         super().__init__()
-        # 论文描述：Decoder 结构镜像 Encoder
-        # Encoder 顺序：ConvBlocks -> LSTM -> Proj
-        # Decoder 顺序：Proj_inv -> LSTM -> ConvBlocks_inv
-        
-        # 1. 镜像 Encoder 的 Proj 层 (kernel=7)
-        self.proj_in = nn.utils.weight_norm(nn.Conv1d(hidden, hidden * 2, kernel_size=7, padding=3))
-        
-        # 2. 镜像 Encoder 的 LSTM 层 (hidden * 2 -> hidden)
-        # 因为是双向，所以每向维度是 hidden // 2
-        self.lstm = nn.LSTM(hidden * 2, hidden // 2, lstm_layers, batch_first=True, bidirectional=True)
-        
-        # 3. 镜像 Encoder 的 ConvBlocks 层 (hidden -> 256 -> 128 -> 64 -> 1)
-        t_strides = list(reversed(strides))
-        ch = [hidden, 256, 128, 64, 1]
-        self.blocks = nn.ModuleList([
-            ConvBlock(ch[i], ch[i+1], stride=s, transpose=True)
-            for i, s in enumerate(t_strides)
-        ])
+        self.model = _SEANetDecoder(
+            channels=cfg.get('channels', 1),
+            dimension=cfg['dimension'],
+            n_filters=cfg.get('n_filters', 32),
+            n_residual_layers=cfg.get('n_residual_layers', 1),
+            ratios=cfg.get('ratios', [8, 5, 4, 2]),
+            activation=cfg.get('activation', 'ELU'),
+            activation_params=cfg.get('activation_params', {'alpha': 1.0}),
+            final_activation=cfg.get('final_activation', 'Tanh'),
+            final_activation_params=cfg.get('final_activation_params', {}),
+            norm=cfg.get('norm', 'weight_norm'),
+            norm_params=cfg.get('norm_params', {}),
+            kernel_size=cfg.get('kernel_size', 7),
+            last_kernel_size=cfg.get('last_kernel_size', 7),
+            residual_kernel_size=cfg.get('residual_kernel_size', 3),
+            dilation_base=cfg.get('dilation_base', 2),
+            causal=cfg.get('causal', False),
+            pad_mode=cfg.get('pad_mode', 'reflect'),
+            true_skip=cfg.get('true_skip', False),
+            compress=cfg.get('compress', 2),
+            lstm=cfg.get('lstm', 2),
+            trim_right_ratio=cfg.get('trim_right_ratio', 1.0),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, T_feat, hidden]
-        x = self.proj_in(x.transpose(1, 2)).transpose(1, 2) # [B, T_feat, hidden*2]
-        x, _ = self.lstm(x) # [B, T_feat, hidden]
-        x = x.transpose(1, 2) # [B, hidden, T_feat]
-        for b in self.blocks:
-            x = b(x)
-        return torch.tanh(x.squeeze(1))  # [B, T]
+        # Legacy input contract: [B, T_feat, hidden]
+        return self.model(x.transpose(1, 2)).squeeze(1)
 
 class WavLMExtractor(nn.Module):
     def __init__(self, name: str = "microsoft/wavlm-large", layer: int = 12):

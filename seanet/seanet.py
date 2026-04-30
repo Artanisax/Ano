@@ -216,6 +216,12 @@ class SEANetDecoder(nn.Module):
 
         if lstm:
             model += [SLSTM(mult * n_filters, num_layers=lstm, bidirectional=bidirectional)]
+        if bidirectional:
+            model += [
+                act(**activation_params) if activation != 'Snake' else act(mult * n_filters * 2),
+                SConv1d(mult * n_filters * 2, mult * n_filters, kernel_size=1, norm=norm, norm_kwargs=norm_params,
+                        causal=causal, pad_mode=pad_mode)
+            ]
 
         # Upsample to raw audio scale
         for i, ratio in enumerate(self.ratios):

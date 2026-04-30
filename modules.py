@@ -44,12 +44,14 @@ LRELU_SLOPE = 0.1
 class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
+        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
+        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
         self.model = _SEANetEncoder(
             channels=cfg.get('channels', 1),
             dimension=cfg['dimension'],
-            n_filters=cfg.get('n_filters', 32),
+            n_filters=cfg.get('n_filters', 64),
             n_residual_layers=cfg.get('n_residual_layers', 1),
-            ratios=cfg.get('ratios', [8, 5, 4, 2]),
+            ratios=strides,
             activation=cfg.get('activation', 'ELU'),
             activation_params=cfg.get('activation_params', {'alpha': 1.0}),
             norm=cfg.get('norm', 'weight_norm'),
@@ -62,7 +64,8 @@ class SpeechEncoder(nn.Module):
             pad_mode=cfg.get('pad_mode', 'reflect'),
             true_skip=cfg.get('true_skip', False),
             compress=cfg.get('compress', 2),
-            lstm=cfg.get('lstm', 2),
+            lstm=lstm_layers,
+            bidirectional=cfg.get('bidirectional', True),
         )
     
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
@@ -156,11 +159,12 @@ class ResidualBottleneck(nn.Module):
         super().__init__()
         bc = cfg['model']['bottleneck']
         hidden_dim = cfg['model']['seanet']['dimension']
+        num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
         self.proj_in = nn.Linear(hidden_dim, bc['codebook_dim'])
         self.rvq = ResidualVectorQuantization(
             dim=bc['codebook_dim'],
             codebook_size=bc['codebook_size'],
-            num_quantizers=bc['num_quantizers'],
+            num_quantizers=num_quantizers,
             decay=bc['decay'],
             kmeans_init=bc['kmeans_init'],
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
@@ -183,12 +187,14 @@ class ResidualBottleneck(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
+        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
+        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
         self.model = _SEANetDecoder(
             channels=cfg.get('channels', 1),
             dimension=cfg['dimension'],
-            n_filters=cfg.get('n_filters', 32),
+            n_filters=cfg.get('n_filters', 64),
             n_residual_layers=cfg.get('n_residual_layers', 1),
-            ratios=cfg.get('ratios', [8, 5, 4, 2]),
+            ratios=strides,
             activation=cfg.get('activation', 'ELU'),
             activation_params=cfg.get('activation_params', {'alpha': 1.0}),
             final_activation=cfg.get('final_activation', 'Tanh'),
@@ -203,8 +209,9 @@ class Decoder(nn.Module):
             pad_mode=cfg.get('pad_mode', 'reflect'),
             true_skip=cfg.get('true_skip', False),
             compress=cfg.get('compress', 2),
-            lstm=cfg.get('lstm', 2),
+            lstm=lstm_layers,
             trim_right_ratio=cfg.get('trim_right_ratio', 1.0),
+            bidirectional=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

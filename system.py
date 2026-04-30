@@ -55,6 +55,9 @@ class AnonSystem(pl.LightningModule):
         if self.enable_mrstft:
             mrstft_resolutions = cfg['losses'].get('mrstft_resolutions')
             self.l_mrstft = MultiResolutionSTFTLoss(resolutions=mrstft_resolutions)
+            
+        self.enable_time_l1 = cfg['losses'].get('enable_time_l1', False)
+        
         self.l_adv = AdvLoss()
         
         self.automatic_optimization = False
@@ -143,6 +146,7 @@ class AnonSystem(pl.LightningModule):
  
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
+        l_time_l1 = F.l1_loss(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_time_l1 else torch.tensor(0.0, device=wav.device)
         
         # ───────── 2. 蒸馏损失 ─────────
         l_spk_ce1, l_spk_ce2, l_spk_cons = self.l_spk.components(spk_s1, spk_s2, spk_ids)
@@ -170,7 +174,8 @@ class AnonSystem(pl.LightningModule):
                  self.cfg['losses']['lambda_l'] * l_lin + 
                  self.cfg['losses']['lambda_e_f0'] * l_emo_f0 +
                  self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
-                 self.cfg['losses']['lambda_mrstft'] * l_mrstft)
+                 self.cfg['losses']['lambda_mrstft'] * l_mrstft +
+                 self.cfg['losses']['lambda_time_l1'] * l_time_l1)
                  
         # 优化生成器
         opt_g.zero_grad()
@@ -197,6 +202,7 @@ class AnonSystem(pl.LightningModule):
                 'train/loss': total,
                 'train/rec': l_rec,
                 'train/mrstft': l_mrstft,
+                'train/time_l1': l_time_l1,
                 'train/adv_g': l_adv_g,
                 'train/adv_g_adv': l_adv_g_adv,
                 'train/adv_g_fm': l_adv_g_fm,
@@ -233,6 +239,7 @@ class AnonSystem(pl.LightningModule):
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
 
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
+        l_time_l1 = F.l1_loss(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_time_l1 else torch.tensor(0.0, device=wav.device)
         # Validation speakers are not guaranteed to share the train label space.
         # Only keep the same-speaker consistency term, which remains meaningful on unseen speakers.
         l_spk = self.l_spk.consistency_only(spk_s1, spk_s2)
@@ -258,7 +265,8 @@ class AnonSystem(pl.LightningModule):
                  self.cfg['losses']['lambda_l'] * l_lin +
                  self.cfg['losses']['lambda_e_f0'] * l_emo_f0 +
                  self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
-                 self.cfg['losses']['lambda_mrstft'] * l_mrstft)
+                 self.cfg['losses']['lambda_mrstft'] * l_mrstft +
+                 self.cfg['losses']['lambda_time_l1'] * l_time_l1)
 
         bs = wav.shape[0]
         self.log_dict(
@@ -266,6 +274,7 @@ class AnonSystem(pl.LightningModule):
                 'val/loss': total,
                 'val/rec': l_rec,
                 'val/mrstft': l_mrstft,
+                'val/time_l1': l_time_l1,
                 'val/adv_g': l_adv_g,
                 'val/adv_g_adv': l_adv_g_adv,
                 'val/adv_g_fm': l_adv_g_fm,

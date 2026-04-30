@@ -74,7 +74,7 @@ preprocess:
   f0_min: 60.0
   f0_max: 600.0
   wavlm_model: "microsoft/wavlm-large"
-  wavlm_layer_idx: 12
+  wavlm_layer_idx: 17
   kmeans_n_clusters: 1024
   kmeans_sample_frames: 5000000 # for 320 hop length
   # kmeans_sample_frames: 6250000 # for 256 hop length
@@ -86,7 +86,7 @@ data:
   # f0_dir: "data/processed/f0_abs"
   f0_dir: "data/processed/f0_log"
   chroma_dir: "data/processed/chroma"
-  token_dir: "data/processed/tokens"
+  token_dir: "data/processed/tokens-17"
   f0_abs_dir: "data/processed/f0_abs"
   f0_log_dir: "data/processed/f0_log"
 
@@ -112,6 +112,6 @@ paths:
   val_dirs:   ["data/raw/LibriSpeech/dev-clean", "data/raw/LibriTTS/dev-clean"]
   test_dirs:  ["data/raw/LibriSpeech/test-clean", "data/raw/LibriTTS/test-clean"]
   manifest_dir: "data/processed/manifests"
-  kmeans_path:  "data/processed/kmeans/kmeans_model.pkl"
+  kmeans_path:  "data/processed/kmeans/kmeans_model-17.pkl"
   log_dir:        "runs/"
   test_out_dir:   "data/anonymized_test/"

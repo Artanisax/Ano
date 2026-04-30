@@ -81,6 +81,10 @@ class AnonSystem(pl.LightningModule):
         return compute_mel(wav, n_mels=self.cfg['model']['n_mels'], 
                           sr=self.cfg['model']['sample_rate'], **mel_params).squeeze(1)
 
+    def _compute_mel_3d_nograd(self, wav: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            return self._compute_mel_3d(wav)
+
     def forward(self, wav: torch.Tensor) -> tuple:
         # 分段批次: [B, N, 1, T]，其中训练和验证 N=3
         is_segment_batch = wav.dim() == 4
@@ -94,17 +98,13 @@ class AnonSystem(pl.LightningModule):
             wav_s1 = wav_s2 = wav
         
         # ───────── 主重建路径 ─────────
-        mel_params = get_stft_params(self.cfg, prefix='mel')
-        mel_main_4d = compute_mel(wav_main, self.cfg['model']['n_mels'], 
-                                  self.cfg['model']['sample_rate'], **mel_params)
+        mel_main_4d = self._compute_mel_3d_nograd(wav_main).unsqueeze(1)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
 
-        mel_s1_4d = compute_mel(wav_s1, self.cfg['model']['n_mels'],
-                                self.cfg['model']['sample_rate'], **mel_params)
+        mel_s1_4d = self._compute_mel_3d_nograd(wav_s1).unsqueeze(1)
         spk_s1 = self.spk_enc(mel_s1_4d)           # [B, 512]
         
-        mel_s2_4d = compute_mel(wav_s2, self.cfg['model']['n_mels'],
-                                self.cfg['model']['sample_rate'], **mel_params)
+        mel_s2_4d = self._compute_mel_3d_nograd(wav_s2).unsqueeze(1)
         spk_s2 = self.spk_enc(mel_s2_4d)           # [B, 512]
         
         # 使用 s1 作为跨片段的说话人身份源，避免退化成当前片段条件向量捷径
@@ -135,7 +135,7 @@ class AnonSystem(pl.LightningModule):
         wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
         
         # ───────── 1. 重建损失 ─────────
-        mel_gt = self._compute_mel_3d(wav[:, 0])
+        mel_gt = self._compute_mel_3d_nograd(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
         
         T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
@@ -226,7 +226,7 @@ class AnonSystem(pl.LightningModule):
 
         wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
 
-        mel_gt = self._compute_mel_3d(wav[:, 0])
+        mel_gt = self._compute_mel_3d_nograd(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
         T_min = min(mel_rec.shape[-1], mel_gt.shape[-1])
         mel_rec, mel_gt = mel_rec[..., :T_min], mel_gt[..., :T_min]

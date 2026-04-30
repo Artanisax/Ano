@@ -11,6 +11,7 @@ import joblib
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+from pathlib import Path
 
 # 🔑 关键修复 1: 强制使用 spawn 启动方法，避免 fork 继承损坏的 CUDA 上下文
 try:
@@ -21,7 +22,37 @@ except RuntimeError:
 def load_cfg(path: str = "configs.yaml") -> dict:
     with open(path) as f: return yaml.safe_load(f)
 
-def run_manifest(cfg: dict):
+def _infer_speaker_id(wav_path: str, dataset_root: str) -> int | None:
+    """
+    从 LibriSpeech / LibriTTS 风格路径中解析真实 speaker id。
+
+    典型结构:
+      LibriSpeech: <split>/<speaker>/<chapter>/<utt>.flac
+      LibriTTS:    <split>/<speaker>/<chapter>/<utt>.wav
+
+    回退策略:
+    1) 优先取相对数据根目录后的第一个纯数字目录；
+    2) 若失败，再从文件名首段提取 speaker id。
+    """
+    wav_path = os.path.abspath(wav_path)
+    dataset_root = os.path.abspath(dataset_root)
+
+    try:
+        rel_parts = Path(os.path.relpath(wav_path, dataset_root)).parts
+    except ValueError:
+        rel_parts = Path(wav_path).parts
+
+    for part in rel_parts[:-1]:
+        if part.isdigit():
+            return int(part)
+
+    stem = Path(wav_path).stem
+    first_token = stem.split('_')[0].split('-')[0]
+    if first_token.isdigit():
+        return int(first_token)
+    return None
+
+def run_manifest(cfg: dict, force: bool = False):
     splits = {"train": cfg['paths']['train_dirs'], "val": cfg['paths']['val_dirs'], "test": cfg['paths']['test_dirs']}
     os.makedirs(cfg['paths']['manifest_dir'], exist_ok=True)
     seed = cfg.get('random_seed', 42)
@@ -30,21 +61,29 @@ def run_manifest(cfg: dict):
     for split, dirs in splits.items():
         mf = os.path.join(cfg['paths']['manifest_dir'], f"{split}_manifest.txt")
         spk_map_path = os.path.join(cfg['paths']['manifest_dir'], f"{split}_manifest_spk_map.json")
-        if os.path.exists(mf): print(f"[{split}] Manifest exists, skipping."); continue
+        if os.path.exists(mf) and not force:
+            print(f"[{split}] Manifest exists, skipping.")
+            continue
         entries = []
         for d in dirs:
-            if not os.path.isdir(d): continue
+            if not os.path.isdir(d):
+                continue
             for root, _, files in os.walk(d):
                 for f in files:
                     if f.endswith(('.wav', '.flac')):
-                        spk = os.path.basename(root)
-                        if spk.isdigit(): entries.append((os.path.join(root, f), int(spk)))
-        if not entries: continue
+                        wav_path = os.path.join(root, f)
+                        spk = _infer_speaker_id(wav_path, d)
+                        if spk is not None:
+                            entries.append((wav_path, spk))
+        if not entries:
+            continue
         unique_spks = sorted(set(s for _, s in entries))
         spk_map = {old: new for new, old in enumerate(unique_spks)}
-        with open(spk_map_path, 'w') as fp: json.dump(spk_map, fp)
+        with open(spk_map_path, 'w') as fp:
+            json.dump(spk_map, fp)
         with open(mf, 'w') as fp:
-            for wav, old_spk in entries: fp.write(f"{wav}|{spk_map[old_spk]}\n")
+            for wav, old_spk in entries:
+                fp.write(f"{wav}|{spk_map[old_spk]}\n")
         print(f"[{split}] Generated: {len(entries)} utts, {len(unique_spks)} spk.")
 
 # 🔑 关键修复 2: Worker 初始化函数，限制子进程内部库的线程数
@@ -413,17 +452,28 @@ def main():
     parser.add_argument('--mode', choices=['manifest', 'f0', 'chroma', 'kmeans', 'tokens', 'cpu', 'gpu'], required=True)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--force_manifest', action='store_true',
+                        help='重新生成 manifest 和 spk_map，即使文件已存在')
     args = parser.parse_args()
     cfg = load_cfg(args.config)
     seed = cfg.get('random_seed', 42)
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
 
-    if args.mode == 'manifest': run_manifest(cfg)
+    if args.mode == 'manifest': run_manifest(cfg, force=args.force_manifest)
     elif args.mode == 'f0': run_f0(cfg, args.workers)
     elif args.mode == 'chroma': run_chroma(cfg, args.workers)
     elif args.mode == 'kmeans': run_kmeans(cfg, args.gpu)
     elif args.mode == 'tokens': run_tokens(cfg, args.gpu)
-    elif args.mode == 'cpu': run_cpu(cfg, args.workers)
+    elif args.mode == 'cpu':
+        if args.force_manifest:
+            run_manifest(cfg, force=True)
+            print("\n[2/4] Extracting F0 (abs+log)...")
+            run_f0(cfg, args.workers)
+            print("\n[3/4] Extracting Chroma...")
+            run_chroma(cfg, args.workers)
+            print("\n✅ CPU 预处理完成！")
+        else:
+            run_cpu(cfg, args.workers)
     elif args.mode == 'gpu': run_gpu(cfg, args.gpu)
 
 if __name__ == "__main__":

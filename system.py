@@ -146,7 +146,9 @@ class AnonSystem(pl.LightningModule):
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
         
         # ───────── 2. 蒸馏损失 ─────────
-        l_spk = self.l_spk(spk_s1, spk_s2, spk_ids)
+        l_spk_ce1, l_spk_ce2, l_spk_cons = self.l_spk.components(spk_s1, spk_s2, spk_ids)
+        l_spk_ce = l_spk_ce1 + l_spk_ce2
+        l_spk = l_spk_ce + l_spk_cons
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
         chroma_batch = batch.get('chroma')
@@ -204,6 +206,8 @@ class AnonSystem(pl.LightningModule):
                 'train/adv_d_fake': l_adv_d_fake,
                 'train/com': com,
                 'train/spk': l_spk,
+                'train/spk_ce': l_spk_ce,
+                'train/spk_cons': l_spk_cons,
                 'train/lin': l_lin,
                 'train/emo_f0': l_emo_f0,
                 'train/emo_chroma': l_emo_chroma,
@@ -217,7 +221,6 @@ class AnonSystem(pl.LightningModule):
         f0_main = batch['f0'][:, 0]
         tok_main = batch.get('tok')
         tokens = tok_main[:, 0] if tok_main is not None else None
-        spk_ids = batch['spk_ids']
 
         if not self.use_cache:
             tokens = self.get_tokens_dynamic(wav[:, 0])
@@ -231,7 +234,9 @@ class AnonSystem(pl.LightningModule):
         l_rec = F.l1_loss(mel_rec, mel_gt) + F.mse_loss(mel_rec, mel_gt)
 
         l_mrstft = self.l_mrstft(wav_rec.squeeze(1), wav[:, 0].squeeze(1)) if self.enable_mrstft else torch.tensor(0.0, device=wav.device)
-        l_spk = self.l_spk(spk_s1, spk_s2, spk_ids)
+        # Validation speakers are not guaranteed to share the train label space.
+        # Only keep the same-speaker consistency term, which remains meaningful on unseen speakers.
+        l_spk = self.l_spk.consistency_only(spk_s1, spk_s2)
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
         chroma_batch = batch.get('chroma')
@@ -269,7 +274,7 @@ class AnonSystem(pl.LightningModule):
                 'val/adv_d_real': l_adv_d_real,
                 'val/adv_d_fake': l_adv_d_fake,
                 'val/com': com,
-                'val/spk': l_spk,
+                'val/spk_cons': l_spk,
                 'val/lin': l_lin,
                 'val/emo_f0': l_emo_f0,
                 'val/emo_chroma': l_emo_chroma,

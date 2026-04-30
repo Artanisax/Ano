@@ -7,10 +7,18 @@ class SpkDistillLoss(nn.Module):
     def __init__(self, dim: int, num_speakers: int):
         super().__init__()
         self.clf = nn.Linear(dim, num_speakers)
-    def forward(self, s1: torch.Tensor, s2: torch.Tensor, spk_ids: torch.Tensor) -> torch.Tensor:
+
+    def components(self, s1: torch.Tensor, s2: torch.Tensor, spk_ids: torch.Tensor):
         ce1 = -F.log_softmax(self.clf(s1), dim=1).gather(1, spk_ids.unsqueeze(1)).mean()
         ce2 = -F.log_softmax(self.clf(s2), dim=1).gather(1, spk_ids.unsqueeze(1)).mean()
-        cos = 1.0 - F.cosine_similarity(s1, s2, dim=-1).mean()
+        cos = self.consistency_only(s1, s2)
+        return ce1, ce2, cos
+
+    def consistency_only(self, s1: torch.Tensor, s2: torch.Tensor) -> torch.Tensor:
+        return 1.0 - F.cosine_similarity(s1, s2, dim=-1).mean()
+
+    def forward(self, s1: torch.Tensor, s2: torch.Tensor, spk_ids: torch.Tensor) -> torch.Tensor:
+        ce1, ce2, cos = self.components(s1, s2, spk_ids)
         return ce1 + ce2 + cos
 
 class LinDistillLoss(nn.Module):

@@ -126,25 +126,30 @@ class AdvLoss(nn.Module):
     ):
         if mode == 'gen':
             # Adversarial term: sum over enabled discriminator branches.
-            l_adv = sum(torch.mean((1 - d) ** 2) for d in disc_fake)
+            l_adv = 0.0
+            for dg in disc_fake:
+                l_adv += torch.mean((1 - dg) ** 2)
+
             fm_loss = 0.0
-            fm_count = 0
             for fr_list, fg_list in zip(fmap_real, fmap_fake):
+                branch_fm_loss = 0.0
                 for fr, fg in zip(fr_list, fg_list):
-                    min_t = min(fr.shape[2], fg.shape[2])
-                    fr_s = fr[:, :, :min_t, ...]
-                    fg_s = fg[:, :, :min_t, ...]
-                    fm_loss += torch.mean(torch.abs(fr_s - fg_s))
-                    fm_count += 1
-            if fm_count > 0:
-                fm_loss = fm_loss / fm_count
-            total = l_adv + 2.0 * fm_loss
+                    branch_fm_loss += torch.mean(torch.abs(fr - fg))
+                fm_loss += branch_fm_loss / len(fr_list)
+            
+            total = l_adv + fm_loss
             if return_components:
                 return total, l_adv, fm_loss
             return total
         else:
-            l_real = sum(torch.mean((1 - d) ** 2) for d in disc_real)
-            l_fake = sum(torch.mean(d ** 2) for d in disc_fake)
+            l_real = 0.0
+            for dr in disc_real:
+                l_real += torch.mean((1 - dr) ** 2)
+            
+            l_fake = 0.0
+            for dg in disc_fake:
+                l_fake += torch.mean(dg ** 2)
+                
             total = l_real + l_fake
             if return_components:
                 return total, l_real, l_fake

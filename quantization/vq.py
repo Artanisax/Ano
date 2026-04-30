@@ -66,51 +66,43 @@ class ResidualVectorQuantizer(nn.Module):
             threshold_ema_dead_code=self.threshold_ema_dead_code,
         )
 
-    def forward(self, x: torch.Tensor, frame_rate: int, bandwidth: tp.Optional[float] = None) -> QuantizedResult:
+    def forward(self, x: torch.Tensor, n_q: tp.Optional[int] = None, layers: tp.Optional[list] = None) -> QuantizedResult:
         """Residual vector quantization on the given input tensor.
         Args:
             x (torch.Tensor): Input tensor.
-            frame_rate (int): Sample rate of the input tensor.
-            bandwidth (float): Target bandwidth.
+            n_q (int): Number of quantizer used to quantize. Default: All quantizers.
+            layers (list): Layer that need to return quantized. Defalt: None.
         Returns:
             QuantizedResult:
                 The quantized (or approximately quantized) representation with
-                the associated bandwidth and any penalty term for the loss.
+                the associated numbert quantizers and layer quantized required to return.
         """
-        bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
-        n_q = self.get_num_quantizers_for_bandwidth(frame_rate, bandwidth)
-        quantized, codes, commit_loss = self.vq(x, n_q=n_q)
-        bw = torch.tensor(n_q * bw_per_q).to(x)
-        return QuantizedResult(quantized, codes, bw, penalty=torch.mean(commit_loss))
+        n_q = n_q if n_q else self.n_q
+        if layers and max(layers) >= n_q:
+            raise ValueError(f'Last layer index in layers: A {max(layers)}. Number of quantizers in RVQ: B {self.n_q}. A must less than B.')
+        quantized, codes, commit_loss, quantized_list = self.vq(x, n_q=n_q, layers=layers)
+        return quantized, codes, torch.mean(commit_loss), quantized_list
 
-    def get_num_quantizers_for_bandwidth(self, frame_rate: int, bandwidth: tp.Optional[float] = None) -> int:
-        """Return n_q based on specified target bandwidth.
-        """
-        bw_per_q = self.get_bandwidth_per_quantizer(frame_rate)
-        n_q = self.n_q
-        if bandwidth and bandwidth > 0.:
-            # bandwidth is represented as a thousandth of what it is, e.g. 6kbps bandwidth is represented as
-            # bandwidth == 6.0
-            n_q = int(max(1, math.floor(bandwidth * 1000 / bw_per_q)))
-        return n_q
 
-    def get_bandwidth_per_quantizer(self, frame_rate: int):
-        """Return bandwidth per quantizer for a given input frame rate.
-        Each quantizer encodes a frame with lg(bins) bits.
-        """
-        return math.log2(self.bins) * frame_rate
-
-    def encode(self, x: torch.Tensor, frame_rate: int, bandwidth: tp.Optional[float] = None) -> torch.Tensor:
-        """Encode a given input tensor with the specified frame rate at the given bandwidth.
-        The RVQ encode method sets the appropriate number of quantizers to use
+    def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None, st: tp.Optional[int] = None) -> torch.Tensor:
+        """Encode a given input tensor with the specified sample rate at the given bandwidth.
+        The RVQ encode method sets the appropriate number of quantizer to use
         and returns indices for each quantizer.
+        Args:
+            x (torch.Tensor): Input tensor.
+            n_q (int): Number of quantizer used to quantize. Default: All quantizers.
+            st (int): Start to encode input from which layers. Default: 0.
         """
-        n_q = self.get_num_quantizers_for_bandwidth(frame_rate, bandwidth)
-        codes = self.vq.encode(x, n_q=n_q)
+        n_q = n_q if n_q else self.n_q
+        st = st or 0
+        codes = self.vq.encode(x, n_q=n_q, st=st)
         return codes
 
-    def decode(self, codes: torch.Tensor) -> torch.Tensor:
+    def decode(self, codes: torch.Tensor, st: int = 0) -> torch.Tensor:
         """Decode the given codes to the quantized representation.
+        Args:
+            codes (torch.Tensor): Input indices for each quantizer.
+            st (int): Start to decode input codes from which layers. Default: 0.
         """
-        quantized = self.vq.decode(codes)
+        quantized = self.vq.decode(codes, st=st)
         return quantized

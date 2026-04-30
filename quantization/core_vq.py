@@ -30,16 +30,14 @@
 # SOFTWARE.
 
 """Core vector quantization implementation."""
-
 import typing as tp
-import warnings
 
 from einops import rearrange, repeat
 import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .. import distrib
+from .distrib import broadcast_tensors, rank
 
 
 def default(val: tp.Any, d: tp.Any) -> tp.Any:
@@ -148,7 +146,7 @@ class EuclideanCodebook(nn.Module):
         self.cluster_size.data.copy_(cluster_size)
         self.inited.data.copy_(torch.Tensor([True]))
         # Make sure all buffers across workers are in sync after initialization
-        distrib.broadcast_tensors(self.buffers())
+        #broadcast_tensors(self.buffers())
 
     def replace_(self, samples, mask):
         modified_codebook = torch.where(
@@ -166,7 +164,7 @@ class EuclideanCodebook(nn.Module):
 
         batch_samples = rearrange(batch_samples, "... d -> (...) d")
         self.replace_(batch_samples, mask=expired_codes)
-        distrib.broadcast_tensors(self.buffers())
+        #broadcast_tensors(self.buffers())
 
     def preprocess(self, x):
         x = rearrange(x, "... d -> (...) d")
@@ -304,9 +302,6 @@ class VectorQuantization(nn.Module):
         loss = torch.tensor([0.0], device=device, requires_grad=self.training)
 
         if self.training:
-            warnings.warn('When using RVQ in training model, first check '
-                          'https://github.com/facebookresearch/encodec/issues/25 . '
-                          'The bug wasn\'t fixed here for reproducibility.')
             if self.commitment_weight > 0:
                 commit_loss = F.mse_loss(quantize.detach(), x)
                 loss = loss + commit_loss * self.commitment_weight
@@ -326,31 +321,35 @@ class ResidualVectorQuantization(nn.Module):
             [VectorQuantization(**kwargs) for _ in range(num_quantizers)]
         )
 
-    def forward(self, x, n_q: tp.Optional[int] = None):
+    def forward(self, x, n_q: tp.Optional[int] = None, layers: tp.Optional[list] = None):
         quantized_out = 0.0
         residual = x
 
         all_losses = []
         all_indices = []
+        out_quantized = []
 
         n_q = n_q or len(self.layers)
 
-        for layer in self.layers[:n_q]:
+        for i, layer in enumerate(self.layers[:n_q]):
             quantized, indices, loss = layer(residual)
             residual = residual - quantized
             quantized_out = quantized_out + quantized
 
             all_indices.append(indices)
             all_losses.append(loss)
+            if layers and i in layers:
+                out_quantized.append(quantized)
 
         out_losses, out_indices = map(torch.stack, (all_losses, all_indices))
-        return quantized_out, out_indices, out_losses
+        return quantized_out, out_indices, out_losses, out_quantized
 
-    def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, n_q: tp.Optional[int] = None, st: tp.Optional[int]= None) -> torch.Tensor:
         residual = x
         all_indices = []
         n_q = n_q or len(self.layers)
-        for layer in self.layers[:n_q]:
+        st = st or 0
+        for layer in self.layers[st:n_q]: 
             indices = layer.encode(residual)
             quantized = layer.decode(indices)
             residual = residual - quantized
@@ -358,10 +357,10 @@ class ResidualVectorQuantization(nn.Module):
         out_indices = torch.stack(all_indices)
         return out_indices
 
-    def decode(self, q_indices: torch.Tensor) -> torch.Tensor:
+    def decode(self, q_indices: torch.Tensor, st: int=0) -> torch.Tensor:
         quantized_out = torch.tensor(0.0, device=q_indices.device)
         for i, indices in enumerate(q_indices):
-            layer = self.layers[i]
+            layer = self.layers[st + i]
             quantized = layer.decode(indices)
             quantized_out = quantized_out + quantized
         return quantized_out

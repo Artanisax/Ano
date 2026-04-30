@@ -197,8 +197,7 @@ class SConv1d(nn.Module):
         kernel_size = self.conv.conv.kernel_size[0]
         stride = self.conv.conv.stride[0]
         dilation = self.conv.conv.dilation[0]
-        kernel_size = (kernel_size - 1) * dilation + 1  # effective kernel size with dilations
-        padding_total = kernel_size - stride
+        padding_total = (kernel_size - 1) * dilation - (stride - 1)
         extra_padding = get_extra_padding_for_conv1d(x, kernel_size, stride, padding_total)
         if self.causal:
             # Left padding for causal

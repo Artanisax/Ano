@@ -173,19 +173,8 @@ class ResidualBottleneck(nn.Module):
         h_bt = self.proj_in(x)
         h = h_bt.transpose(1, 2)
 
-        quantized_out = 0.0
-        residual = h
-        losses = []
-        quantized_list = []
-
-        for layer in self.rvq.layers:
-            quantized, _, loss = layer(residual)
-            residual = residual - quantized
-            quantized_out = quantized_out + quantized
-            quantized_list.append(quantized)
-            losses.append(loss)
-
-        com = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=x.device)
+        quantized_out, _, losses, quantized_list = self.rvq(h, layers=[0, 1])
+        com = losses.mean() if losses.numel() > 0 else torch.tensor(0.0, device=x.device)
         q1 = quantized_list[0].transpose(1, 2)
         q2 = quantized_list[1].transpose(1, 2) if len(quantized_list) > 1 else torch.zeros_like(q1)
         out = self.proj_out(quantized_out.transpose(1, 2))

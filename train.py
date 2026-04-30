@@ -25,6 +25,37 @@ def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
             items[new_key] = v
     return items
 
+def _count_parameters(module) -> int:
+    if module is None:
+        return 0
+    return sum(p.numel() for p in module.parameters())
+
+def _format_params(num_params: int) -> str:
+    if num_params >= 1_000_000_000:
+        return f"{num_params / 1_000_000_000:.2f}B"
+    if num_params >= 1_000_000:
+        return f"{num_params / 1_000_000:.2f}M"
+    if num_params >= 1_000:
+        return f"{num_params / 1_000:.2f}K"
+    return str(num_params)
+
+def _print_model_size_summary(model: AnonSystem):
+    gen_modules = [model.enc, model.spk_enc, model.bottleneck, model.dec]
+    gen_params = sum(_count_parameters(m) for m in gen_modules)
+
+    disc_total = _count_parameters(model.disc)
+    mpd_params = _count_parameters(getattr(model.disc, "mpd", None))
+    msd_params = _count_parameters(getattr(model.disc, "msd", None))
+    mstftd_params = _count_parameters(getattr(model.disc, "mstftd", None))
+
+    print("\n[Model Size Summary]")
+    print(f"  Generator total : {_format_params(gen_params)} ({gen_params:,})")
+    print(f"  Discriminator   : {_format_params(disc_total)} ({disc_total:,})")
+    print(f"    MPD           : {_format_params(mpd_params)} ({mpd_params:,})")
+    print(f"    MSD           : {_format_params(msd_params)} ({msd_params:,})")
+    print(f"    MSTFTD        : {_format_params(mstftd_params)} ({mstftd_params:,})")
+    print("")
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the anonymization system")
     parser.add_argument(
@@ -74,6 +105,7 @@ def main():
     tb_logger = TensorBoardLogger(cfg['paths']['log_dir'], name="Ano")
     ckpt_dir = os.path.join(tb_logger.log_dir, "checkpoints")
     model = AnonSystem(cfg, num_speakers=num_spk)
+    _print_model_size_summary(model)
 
     # Ensure full and flattened hyperparameters are persisted at training start.
     os.makedirs(tb_logger.log_dir, exist_ok=True)

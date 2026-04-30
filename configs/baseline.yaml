@@ -31,7 +31,7 @@ training:
   max_steps: 500000
   max_epochs: 10
   lr_g: 1.25e-4
-  lr_d: 1.25e-4
+  lr_d: 1.25e-5
   gamma: 0.8
   betas: [0.8, 0.99]
   weight_decay: 1.0e-5
@@ -45,7 +45,7 @@ training:
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
   # log_every_n_steps: 10
-  log_every_n_steps: 250
+  log_every_n_steps: 100
 
 losses:
   lambda_r: 45.0

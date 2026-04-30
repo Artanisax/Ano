@@ -2,6 +2,7 @@
 import yaml
 import json
 import os
+import argparse
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
@@ -24,8 +25,19 @@ def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
             items[new_key] = v
     return items
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train the anonymization system")
+    parser.add_argument(
+        "--config",
+        default="configs.yaml",
+        help="Path to the YAML config file",
+    )
+    return parser.parse_args()
+
 def main():
-    with open("configs.yaml") as f: cfg = yaml.safe_load(f)
+    args = parse_args()
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
     setup_seed(cfg.get('random_seed', 42))
     train_workers = cfg['training'].get('train_num_workers', cfg['training'].get('num_workers', 0))
     val_workers = cfg['training'].get('val_num_workers', cfg['training'].get('num_workers', 0))

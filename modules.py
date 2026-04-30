@@ -228,12 +228,16 @@ class ResidualBottleneck(nn.Module):
         quantized, _, commit_loss = self.rvq(h)  # quantized:[B, T_feat, codebook_dim]
         com = commit_loss.mean() if commit_loss.dim() > 0 else commit_loss # scalar
         
-        # 显式提取 q1, q2 用于蒸馏
+        # 显式提取 q1, q2 用于蒸馏。
+        # Forward 使用离散码本值；backward 采用 straight-through 让蒸馏梯度回传到上游 h。
         _, idx1, _ = self.q1_layer(h)  # idx1:[B, T_feat]
-        q1 = self.q1_layer.codebook[idx1.long()]  # [B, T_feat, codebook_dim]
+        q1_embed = self.q1_layer.codebook[idx1.long()]  # [B, T_feat, codebook_dim]
+        q1 = h + (q1_embed - h).detach()
         
-        _, idx2, _ = self.q2_layer(h - q1.detach())  # idx2:[B, T_feat]
-        q2 = self.q2_layer.codebook[idx2.long()]  # [B, T_feat, codebook_dim]
+        residual_h = h - q1
+        _, idx2, _ = self.q2_layer(residual_h)  # idx2:[B, T_feat]
+        q2_embed = self.q2_layer.codebook[idx2.long()]  # [B, T_feat, codebook_dim]
+        q2 = residual_h + (q2_embed - residual_h).detach()
         
         return self.proj_out(quantized), q1, q2, com  # out:[B, T_feat, hidden], q1/q2:[B, T_feat, codebook_dim]
 

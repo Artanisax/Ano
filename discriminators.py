@@ -6,24 +6,9 @@ from torch.nn.utils import weight_norm, spectral_norm
 import typing as tp
 import torchaudio
 from einops import rearrange
+from seanet.conv import NormConv2d
 
 LRELU_SLOPE = 0.1
-
-class NormConv2d(nn.Module):
-    """Wrapper around Conv2d and normalization applied to this conv
-    to provide a uniform interface across normalization approaches.
-    """
-    def __init__(self, *args, norm: str = 'none',
-                 norm_kwargs: tp.Dict[str, tp.Any] = {}, **kwargs):
-        super().__init__()
-        self.conv = apply_parametrization_norm(nn.Conv2d(*args, **kwargs), norm)
-        self.norm = get_norm_module(self.conv, causal=False, norm=norm, **norm_kwargs)
-        self.norm_type = norm
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.norm(x)
-        return x
 
 def get_padding(kernel_size, dilation=1):
     return int((kernel_size*dilation - dilation)/2)

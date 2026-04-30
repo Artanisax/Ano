@@ -76,8 +76,8 @@ losses:
   lambda_e_chroma: 1.0
   lambda_mrstft: 1.0
   lambda_time_l1: 1.0
-  f0_type: "abs" # "log" or "abs"
-  enable_chroma: false
+  f0_type: "log" # "log" or "abs"
+  enable_chroma: true
   enable_mrstft: false
   enable_time_l1: false
   mrstft_resolutions:
@@ -104,7 +104,7 @@ preprocess:
 data:
   use_cache: true
   min_duration_sec: 2.0
-  f0_dir: "data/processed/f0_abs"
+  f0_dir: "data/processed/f0_log"
   chroma_dir: "data/processed/chroma"
   token_dir: "data/processed/tokens-6"
   f0_abs_dir: "data/processed/f0_abs"

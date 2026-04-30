@@ -78,8 +78,8 @@ losses:
   lambda_time_l1: 1.0
   f0_type: "abs" # "log" or "abs"
   enable_chroma: false
-  enable_mrstft: false
-  enable_time_l1: false
+  enable_mrstft: true
+  enable_time_l1: true
   mrstft_resolutions:
     - [2048, 320, 1280]
     - [1024, 160, 640]

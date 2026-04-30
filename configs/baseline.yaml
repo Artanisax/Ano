@@ -47,11 +47,11 @@ model:
     threshold_ema_dead_code: 2.0
 
 training:
-  batch_size: 12
+  batch_size: 32
   max_steps: 500000
-  max_epochs: 10
-  lr_g: 7.5e-5
-  lr_d: 7.5e-5
+  max_epochs: 32
+  lr_g: 2.0e-4
+  lr_d: 2.0e-4
   gamma: 0.8
   betas: [0.8, 0.99]
   weight_decay: 1.0e-5

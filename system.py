@@ -88,6 +88,15 @@ class AnonSystem(pl.LightningModule):
         with torch.no_grad():
             return self._compute_mel_3d(wav)
 
+    def remove_weight_norm(self):
+        """Remove weight normalization from all submodules to speed up inference."""
+        def _remove_weight_norm(m):
+            try:
+                torch.nn.utils.remove_weight_norm(m)
+            except ValueError:
+                pass
+        self.apply(_remove_weight_norm)
+
     def forward(self, wav: torch.Tensor) -> tuple:
         # 分段批次: [B, N, 1, T]，其中训练和验证 N=3
         is_segment_batch = wav.dim() == 4

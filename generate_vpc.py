@@ -53,7 +53,8 @@ def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: i
     """
     仅生成匿名化音频的精简推理管道
     """
-    with torch.no_grad():
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
@@ -137,6 +138,9 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
                 
             wav_anon = generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates)
             
+            # 恢复 float32 进行保存
+            wav_anon = wav_anon.float()
+            
             # 裁剪回原始长度
             wav_anon = wav_anon[..., :orig_len]
             
@@ -198,6 +202,13 @@ def main():
         args.ckpt, cfg=cfg, num_speakers=num_speakers, strict=False
     ).to(args.device)
     model.eval()
+
+    # 🔧 移除权重归一化以加速推理
+    if hasattr(model, 'remove_weight_norm'):
+        model.remove_weight_norm()
+        print("⚡ 已移除权重归一化，提升推理速度")
+
+    print(f"🔹 加载说话人池: {args.pool}")
     
     print(f"🔹 加载说话人池: {args.pool}")
     if not Path(args.pool).exists():

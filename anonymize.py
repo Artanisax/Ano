@@ -18,7 +18,7 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
-                          model.cfg['model']['sample_rate'], **mel_params)
+                          model.cfg['model']['sample_rate'], **mel_params).unsqueeze(1)
         feat = model.enc(wav)                     # [1, T_feat, 512]
         s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]
         
@@ -57,11 +57,12 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
 def main():
     parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建 + 匿名)")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
+    parser.add_argument('--config', required=True, help='训练/推理配置文件路径 (.yaml)')
     parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
     parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
     parser.add_argument('--output', default='outputs/Ano', help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
-    parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用 configs.yaml')
+    parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用配置文件')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     parser.add_argument('--ext', nargs='+', default=['.wav', '.flac'], help='支持的音频扩展名')
     args = parser.parse_args()
@@ -75,7 +76,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ───────── 2. 模型与配置加载 ─────────
-    with open("configs.yaml") as f: 
+    with open(args.config) as f:
         cfg = yaml.safe_load(f)
         
     print(f"🔹 加载检查点: {args.ckpt}")

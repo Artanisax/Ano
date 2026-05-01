@@ -28,11 +28,11 @@ def read_kaldi_format(filename):
                 value_list.append(' '.join([x.strip() for x in splitted_line[1:]]))
     return dict(zip(key_list, value_list))
 
-def load_wav_from_scp(wav_path_or_cmd):
-    """处理 Kaldi wav.scp 中的路径或管道命令并返回张量 [1, T]"""
+def load_wav_from_scp(wav_path_or_cmd, target_sr: int = 16000):
+    """处理 Kaldi wav.scp 中的路径或管道命令并返回单声道张量 [1, T]"""
     if isinstance(wav_path_or_cmd, list):
         wav_path_or_cmd = " ".join(str(x) for x in wav_path_or_cmd)
-        
+
     if wav_path_or_cmd.strip().endswith("|"):
         devnull = open(os.devnull, "w")
         try:
@@ -46,7 +46,15 @@ def load_wav_from_scp(wav_path_or_cmd):
             raise IOError("Error processing wav file: {}\n{}".format(wav_path_or_cmd, e))
     else:
         sample, sr = torchaudio.backend.soundfile_backend.load(wav_path_or_cmd)
-        
+
+    if sample.dim() > 1 and sample.shape[0] > 1:
+        sample = sample.mean(dim=0, keepdim=True)
+    elif sample.dim() == 1:
+        sample = sample.unsqueeze(0)
+
+    if sr != target_sr:
+        sample = torchaudio.functional.resample(sample, sr, target_sr)
+
     return sample
 
 def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: int):
@@ -58,7 +66,7 @@ def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: i
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
-                          model.cfg['model']['sample_rate'], **mel_params)
+                          model.cfg['model']['sample_rate'], **mel_params).unsqueeze(1)
         feat = model.enc(wav)                     # [1, T_feat, 512]
         s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]
         
@@ -128,7 +136,10 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
             out_wav_path = out_wav_dir / f"{utid}.wav"
             
             # 使用官方类似的处理方式加载音频
-            wav = load_wav_from_scp(wav_path_or_cmd).to(device).unsqueeze(0)
+            wav = load_wav_from_scp(
+                wav_path_or_cmd,
+                target_sr=cfg['model'].get('sample_rate', 16000),
+            ).to(device).unsqueeze(0)
             
             # 长度保护
             orig_len = wav.shape[-1]
@@ -162,6 +173,7 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
 def main():
     parser = argparse.ArgumentParser(description="生成 VPC 2024 评测所需的匿名化音频")
     parser.add_argument('--ckpt', required=True, help='训练检查点路径 (.ckpt)')
+    parser.add_argument('--config', required=True, help='训练/推理配置文件路径 (.yaml)')
     parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
     parser.add_argument('--vpc_data_dir', default='data', 
                         help='VPC2024 data 目录的路径 (包含 libri_dev, libri_test 等)')
@@ -191,7 +203,7 @@ def main():
 
     # ───────── 1. 模型与配置加载 ─────────
     print(f"🚀 初始化 VPC 2024 评测生成管道")
-    with open("configs.yaml") as f: 
+    with open(args.config) as f:
         cfg = yaml.safe_load(f)
         
     print(f"🔹 加载检查点: {args.ckpt}")

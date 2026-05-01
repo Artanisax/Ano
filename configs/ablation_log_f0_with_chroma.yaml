@@ -57,9 +57,9 @@ training:
   weight_decay: 1.0e-5
   train_num_workers: 20
   val_num_workers: 20
-  precision: "bf16"
+  precision: "bf16-mixed"
   target_samples: 64000
-  # val_check_interval: 0.001
+  val_check_interval: 0.2
   val_check_interval: 0.2
   early_stop_patience: 5
   early_stop_monitor: "val/rec"

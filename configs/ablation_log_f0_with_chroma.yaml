@@ -8,30 +8,9 @@ model:
   hop_length: 320
   win_length: 1280
   n_fft: 1280
-  seanet:
-    enable_seanet: false
-    channels: 1
-    n_filters: 64
+  speechencoder:
     strides: [8, 5, 4, 2]
-    n_residual_layers: 1
-    bidirectional: true
     lstm_layers: 2
-    activation: "ELU"
-    activation_params:
-      alpha: 1.0
-    final_activation: "Tanh"
-    final_activation_params: {}
-    norm: "weight_norm"
-    norm_params: {}
-    kernel_size: 7
-    last_kernel_size: 7
-    residual_kernel_size: 3
-    dilation_base: 2
-    causal: false
-    pad_mode: "reflect"
-    true_skip: false
-    compress: 2
-    trim_right_ratio: 1.0
   speaker:
     style_hidden: 128
     style_head: 2
@@ -58,16 +37,15 @@ training:
   val_num_workers: 20
   precision: "bf16-mixed"
   target_samples: 64000
-  val_check_interval: 0.2
-  val_check_interval: 0.2
+  val_check_interval: 0.05
   early_stop_patience: 8
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
-  log_every_n_steps: 100
+  log_every_n_steps: 10
 
 losses:
   lambda_r: 45.0
-  lambda_a: 1.0
+  lambda_a: 0.0
   lambda_c: 0.1
   lambda_s: 1.0
   lambda_l: 1.0
@@ -85,9 +63,9 @@ losses:
     - [512, 80, 320]
 
 discriminator:
-  enable_mpd: true
-  enable_msd: true
-  enable_mstft: false
+  enable_mpd: false
+  enable_msd: false
+  enable_mstft: true
 
 preprocess:
   f0_min: 60.0

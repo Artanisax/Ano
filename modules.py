@@ -2,82 +2,70 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 from transformers import WavLMModel
-from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder, SConv1d, SConvTranspose1d, SLSTM
-from seanet.seanet import SEANetResnetBlock
 from quantization.core_vq import ResidualVectorQuantization
 from discriminators import MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiScaleSTFTDiscriminator
 
-class _OriginalConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, stride: int, transpose: bool = False, norm: str = 'weight_norm', pad_mode: str = 'reflect'):
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
         super().__init__()
-        self.res_block = SEANetResnetBlock(
-            in_ch,
-            kernel_sizes=[3, 3],
-            dilations=[1, 1],
-            activation='LeakyReLU',
-            activation_params={'negative_slope': 0.1},
-            norm=norm,
-            pad_mode=pad_mode,
-            compress=1,
-            true_skip=True,
+        self.res_conv1 = nn.utils.weight_norm(
+            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
         )
-        kernel = 2 * stride + (stride % 2)
-        self.sample = (
-            SConvTranspose1d(in_ch, out_ch, kernel, stride=stride, norm=norm)
-            if transpose else
-            SConv1d(in_ch, out_ch, kernel, stride=stride, norm=norm, pad_mode=pad_mode)
+        self.res_conv2 = nn.utils.weight_norm(
+            nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
         )
-        self.post = nn.Identity() if transpose else nn.Sequential(
-            nn.GroupNorm(max(1, out_ch // 16), out_ch, eps=1e-6, affine=True),
-            nn.LeakyReLU(0.1),
-        )
+        self.act = nn.LeakyReLU(LRELU_SLOPE)
+        auto_kernel = kernel is None
+        if kernel is None:
+            kernel = 2 * stride + (stride % 2)
+        padding = (kernel - stride) // 2
+        if not transpose:
+            self.sample = nn.utils.weight_norm(
+                nn.Conv1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding, padding_mode='reflect')
+            )
+        else:
+            output_padding = 0 if auto_kernel else (stride % 2)
+            self.sample = nn.utils.weight_norm(nn.ConvTranspose1d(in_ch, out_ch, kernel_size=kernel, stride=stride, padding=padding, output_padding=output_padding))
+        self.apply_sample_post = not (transpose and out_ch == 1)
+        if transpose:
+            self.sample_norm = nn.Identity()
+            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
+        else:
+            groups = max(1, out_ch // 16)
+            self.sample_norm = nn.GroupNorm(groups, out_ch, eps=1e-6, affine=True)
+            self.sample_act = nn.LeakyReLU(LRELU_SLOPE)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.post(self.sample(self.res_block(x)))
+        r = self.res_conv1(self.act(x))
+        r = self.res_conv2(self.act(r))
+        x = r + x
+        x = self.sample(x)
+        if self.apply_sample_post:
+            x = self.sample_norm(x)
+            x = self.sample_act(x)
+        return x
 
-class _OriginalSpeechEncoder(nn.Module):
+class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
+        enc_cfg = cfg.get('speechencoder', {})
         hidden = cfg['dimension']
-        sea_cfg = cfg['seanet']
-        strides = list(reversed(sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))))
-        norm = sea_cfg.get('norm', 'weight_norm')
-        pad_mode = sea_cfg.get('pad_mode', 'reflect')
-        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
+        strides = list(reversed(enc_cfg.get('strides', [8, 5, 4, 2])))
+        lstm_layers = enc_cfg.get('lstm_layers', 2)
         ch = [64, 128, 256, hidden]
-        self.convs = nn.ModuleList([_OriginalConvBlock(1 if i == 0 else ch[i - 1], c, s, norm=norm, pad_mode=pad_mode) for i, (c, s) in enumerate(zip(ch, strides))])
-        self.lstm = SLSTM(hidden, num_layers=lstm_layers, skip=False, bidirectional=True)
-        self.proj = SConv1d(hidden * 2, hidden, sea_cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+        self.convs = nn.ModuleList([ConvBlock(1 if i == 0 else ch[i - 1], c, stride=s) for i, (c, s) in enumerate(zip(ch, strides))])
+        self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
+        self.proj = nn.utils.weight_norm(
+            nn.Conv1d(hidden * 2, hidden, kernel_size=7, padding=3, padding_mode='reflect')
+        )
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         x = wav
         for c in self.convs:
             x = c(x)
-        x = self.lstm(x)
-        return self.proj(x).transpose(1, 2)
-
-class SpeechEncoder(nn.Module):
-    def __init__(self, cfg: dict):
-        super().__init__()
-        sea_cfg = cfg['seanet']
-        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
-        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
-        # Our original encoder/decoder remains the default; SEANet is an optional extension.
-        self.use_seanet = sea_cfg.get('enable_seanet', False)
-        self.model = _SEANetEncoder(
-            channels=sea_cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=sea_cfg.get('n_filters', 64),
-            n_residual_layers=sea_cfg.get('n_residual_layers', 1), ratios=strides, activation=sea_cfg.get('activation', 'ELU'),
-            activation_params=sea_cfg.get('activation_params', {'alpha': 1.0}), norm=sea_cfg.get('norm', 'weight_norm'),
-            norm_params=sea_cfg.get('norm_params', {}), kernel_size=sea_cfg.get('kernel_size', 7), last_kernel_size=sea_cfg.get('last_kernel_size', 7),
-            residual_kernel_size=sea_cfg.get('residual_kernel_size', 3), dilation_base=sea_cfg.get('dilation_base', 2), causal=sea_cfg.get('causal', False),
-            pad_mode=sea_cfg.get('pad_mode', 'reflect'), true_skip=sea_cfg.get('true_skip', False), compress=sea_cfg.get('compress', 2),
-            lstm=lstm_layers, bidirectional=sea_cfg.get('bidirectional', True),
-        ) if self.use_seanet else _OriginalSpeechEncoder(cfg)
-
-    def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        return self.model(wav).transpose(1, 2) if self.use_seanet else self.model(wav)
+        x, _ = self.lstm(x.transpose(1, 2))
+        return self.proj(x.transpose(1, 2)).transpose(1, 2)
 
 class Conv1dGLU(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dropout: float):
@@ -187,19 +175,19 @@ class ResidualBottleneck(nn.Module):
         out = quantized_out.transpose(1, 2)
         return out, q1, q2, com
 
-class _OriginalDecoder(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
+        enc_cfg = cfg.get('speechencoder', {})
         hidden = cfg['dimension']
-        sea_cfg = cfg['seanet']
-        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
-        norm = sea_cfg.get('norm', 'weight_norm')
-        pad_mode = sea_cfg.get('pad_mode', 'reflect')
-        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
-        self.proj_in = SConv1d(hidden, hidden * 2, sea_cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+        strides = enc_cfg.get('strides', [8, 5, 4, 2])
+        lstm_layers = enc_cfg.get('lstm_layers', 2)
+        self.proj_in = nn.utils.weight_norm(
+            nn.Conv1d(hidden, hidden * 2, kernel_size=7, padding=3, padding_mode='reflect')
+        )
         self.lstm = nn.LSTM(hidden * 2, hidden // 2, lstm_layers, batch_first=True, bidirectional=True)
         ch = [hidden, 256, 128, 64, 1]
-        self.blocks = nn.ModuleList([_OriginalConvBlock(ch[i], ch[i + 1], s, transpose=True, norm=norm, pad_mode=pad_mode) for i, s in enumerate(strides)])
+        self.blocks = nn.ModuleList([ConvBlock(ch[i], ch[i + 1], stride=s, transpose=True) for i, s in enumerate(strides)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj_in(x.transpose(1, 2)).transpose(1, 2)
@@ -208,27 +196,6 @@ class _OriginalDecoder(nn.Module):
         for b in self.blocks:
             x = b(x)
         return torch.tanh(x.squeeze(1))
-
-class Decoder(nn.Module):
-    def __init__(self, cfg: dict):
-        super().__init__()
-        sea_cfg = cfg['seanet']
-        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
-        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
-        self.use_seanet = sea_cfg.get('enable_seanet', False)
-        self.model = _SEANetDecoder(
-            channels=sea_cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=sea_cfg.get('n_filters', 64),
-            n_residual_layers=sea_cfg.get('n_residual_layers', 1), ratios=strides, activation=sea_cfg.get('activation', 'ELU'),
-            activation_params=sea_cfg.get('activation_params', {'alpha': 1.0}), final_activation=sea_cfg.get('final_activation', 'Tanh'),
-            final_activation_params=sea_cfg.get('final_activation_params', {}), norm=sea_cfg.get('norm', 'weight_norm'), norm_params=sea_cfg.get('norm_params', {}),
-            kernel_size=sea_cfg.get('kernel_size', 7), last_kernel_size=sea_cfg.get('last_kernel_size', 7), residual_kernel_size=sea_cfg.get('residual_kernel_size', 3),
-            dilation_base=sea_cfg.get('dilation_base', 2), causal=sea_cfg.get('causal', False), pad_mode=sea_cfg.get('pad_mode', 'reflect'),
-            true_skip=sea_cfg.get('true_skip', False), compress=sea_cfg.get('compress', 2), lstm=lstm_layers, trim_right_ratio=sea_cfg.get('trim_right_ratio', 1.0),
-            bidirectional=False,
-        ) if self.use_seanet else _OriginalDecoder(cfg)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x.transpose(1, 2)).squeeze(1) if self.use_seanet else self.model(x)
 
 class WavLMExtractor(nn.Module):
     def __init__(self, name: str = "microsoft/wavlm-large", layer: int = 12):

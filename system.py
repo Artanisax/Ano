@@ -40,15 +40,16 @@ class AnonSystem(pl.LightningModule):
             self.kmeans = None
             
         # 损失函数
+        bottleneck_dim = cfg['model']['seanet']['dimension']
         self.l_spk = SpkDistillLoss(cfg['model']['speaker']['dim'], num_speakers)
-        self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], cfg['model']['bottleneck']['codebook_dim'])
+        self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], bottleneck_dim)
         
         self.f0_type = cfg['losses'].get('f0_type', 'log')
-        self.l_emo = EmoDistillLoss(cfg['model']['bottleneck']['codebook_dim'], f0_type=self.f0_type)
+        self.l_emo = EmoDistillLoss(bottleneck_dim, f0_type=self.f0_type)
         
         self.enable_chroma = cfg['losses'].get('enable_chroma', True)
         if self.enable_chroma:
-            self.l_chroma = ChromaDistillLoss(cfg['model']['bottleneck']['codebook_dim'], n_chroma=24)
+            self.l_chroma = ChromaDistillLoss(bottleneck_dim, n_chroma=24)
         
         # ✅ 从 cfg 读取 MR-STFT 配置（支持消融实验）
         self.enable_mrstft = cfg['losses'].get('enable_mrstft', True)
@@ -110,7 +111,6 @@ class AnonSystem(pl.LightningModule):
             wav_s1 = wav_s2 = wav
         
         # ───────── 主重建路径 ─────────
-        mel_main_4d = self._compute_mel_3d_nograd(wav_main).unsqueeze(1)
         feat_main = self.enc(wav_main)                  # [B, T_feat, 512]
 
         mel_s1_4d = self._compute_mel_3d_nograd(wav_s1).unsqueeze(1)

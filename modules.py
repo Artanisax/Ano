@@ -165,9 +165,8 @@ class ResidualBottleneck(nn.Module):
         bc = cfg['model']['bottleneck']
         hidden_dim = cfg['model']['seanet']['dimension']
         num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
-        self.proj_in = nn.Linear(hidden_dim, bc['codebook_dim'])
         self.rvq = ResidualVectorQuantization(
-            dim=bc['codebook_dim'],
+            dim=hidden_dim,
             codebook_size=bc['codebook_size'],
             num_quantizers=num_quantizers,
             decay=bc['decay'],
@@ -175,18 +174,14 @@ class ResidualBottleneck(nn.Module):
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
             commitment_weight=bc['commitment_weight'],
         )
-        self.proj_out = nn.Linear(bc['codebook_dim'], hidden_dim)
 
     def forward(self, x: torch.Tensor):
-        # x: [B, T, hidden] -> h_bt:[B, T, D] -> h:[B, D, T]
-        h_bt = self.proj_in(x)
-        h = h_bt.transpose(1, 2)
-
+        h = x.transpose(1, 2)
         quantized_out, _, losses, quantized_list = self.rvq(h, layers=[0, 1])
         com = losses.mean() if losses.numel() > 0 else torch.tensor(0.0, device=x.device)
         q1 = quantized_list[0].transpose(1, 2)
         q2 = quantized_list[1].transpose(1, 2) if len(quantized_list) > 1 else torch.zeros_like(q1)
-        out = self.proj_out(quantized_out.transpose(1, 2))
+        out = quantized_out.transpose(1, 2)
         return out, q1, q2, com
 
 class _OriginalDecoder(nn.Module):

@@ -101,8 +101,7 @@ class MultiResolutionSTFTLoss(nn.Module):
             resolutions = [
                 [2048, 320, 1280],
                 [1024, 160, 640],
-                [512, 80, 320],
-                [256, 40, 160]
+                [512, 80, 320]
             ]
         self.stft_losses = nn.ModuleList()
         for fft_size, hop_size, win_size in resolutions:

@@ -10,7 +10,7 @@ model:
   seanet:
     channels: 1
     dimension: 512
-    n_filters: 32 # SpeechTokenizer use 64, we use 32 to accelerate and we add information through bottleneck distilation
+    n_filters: 64
     strides: [8, 5, 4, 2]
     n_residual_layers: 1
     bidirectional: true

@@ -4,13 +4,13 @@ random_seed: 42
 model:
   sample_rate: 16000
   n_mels: 80
+  dimension: 512
   hop_length: 320
   win_length: 1280
   n_fft: 1280
   seanet:
     enable_seanet: false
     channels: 1
-    dimension: 512
     n_filters: 64
     strides: [8, 5, 4, 2]
     n_residual_layers: 1
@@ -33,7 +33,6 @@ model:
     compress: 2
     trim_right_ratio: 1.0
   speaker:
-    dim: 512
     style_hidden: 128
     style_head: 2
     style_tcn_kernel: 5

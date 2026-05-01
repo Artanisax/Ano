@@ -74,7 +74,7 @@ def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: i
         # 高斯扰动
         pool_mean = vctk_pool.mean(dim=0, keepdim=True)
         pool_std = vctk_pool.std(dim=0, keepdim=True)
-        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
+        s_hat = torch.randn(1, model.cfg['model']['dimension'], device=device)
         s_hat = s_hat * pool_std + pool_mean
         
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]

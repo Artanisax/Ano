@@ -41,14 +41,15 @@ class _OriginalSpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         hidden = cfg['dimension']
-        strides = list(reversed(cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))))
-        norm = cfg.get('norm', 'weight_norm')
-        pad_mode = cfg.get('pad_mode', 'reflect')
-        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        sea_cfg = cfg['seanet']
+        strides = list(reversed(sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))))
+        norm = sea_cfg.get('norm', 'weight_norm')
+        pad_mode = sea_cfg.get('pad_mode', 'reflect')
+        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
         ch = [64, 128, 256, hidden]
         self.convs = nn.ModuleList([_OriginalConvBlock(1 if i == 0 else ch[i - 1], c, s, norm=norm, pad_mode=pad_mode) for i, (c, s) in enumerate(zip(ch, strides))])
         self.lstm = SLSTM(hidden, num_layers=lstm_layers, skip=False, bidirectional=True)
-        self.proj = SConv1d(hidden * 2, hidden, cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+        self.proj = SConv1d(hidden * 2, hidden, sea_cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         x = wav
@@ -60,18 +61,19 @@ class _OriginalSpeechEncoder(nn.Module):
 class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
-        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
-        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        sea_cfg = cfg['seanet']
+        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
+        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
         # Our original encoder/decoder remains the default; SEANet is an optional extension.
-        self.use_seanet = cfg.get('enable_seanet', False)
+        self.use_seanet = sea_cfg.get('enable_seanet', False)
         self.model = _SEANetEncoder(
-            channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
-            n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
-            activation_params=cfg.get('activation_params', {'alpha': 1.0}), norm=cfg.get('norm', 'weight_norm'),
-            norm_params=cfg.get('norm_params', {}), kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7),
-            residual_kernel_size=cfg.get('residual_kernel_size', 3), dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False),
-            pad_mode=cfg.get('pad_mode', 'reflect'), true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2),
-            lstm=lstm_layers, bidirectional=cfg.get('bidirectional', True),
+            channels=sea_cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=sea_cfg.get('n_filters', 64),
+            n_residual_layers=sea_cfg.get('n_residual_layers', 1), ratios=strides, activation=sea_cfg.get('activation', 'ELU'),
+            activation_params=sea_cfg.get('activation_params', {'alpha': 1.0}), norm=sea_cfg.get('norm', 'weight_norm'),
+            norm_params=sea_cfg.get('norm_params', {}), kernel_size=sea_cfg.get('kernel_size', 7), last_kernel_size=sea_cfg.get('last_kernel_size', 7),
+            residual_kernel_size=sea_cfg.get('residual_kernel_size', 3), dilation_base=sea_cfg.get('dilation_base', 2), causal=sea_cfg.get('causal', False),
+            pad_mode=sea_cfg.get('pad_mode', 'reflect'), true_skip=sea_cfg.get('true_skip', False), compress=sea_cfg.get('compress', 2),
+            lstm=lstm_layers, bidirectional=sea_cfg.get('bidirectional', True),
         ) if self.use_seanet else _OriginalSpeechEncoder(cfg)
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
@@ -94,12 +96,13 @@ class Conv1dGLU(nn.Module):
 class SpeakerEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
+        spk_cfg = cfg['speaker']
         in_dim = cfg['n_mels']
-        hidden = cfg.get('style_hidden', 128)
-        out_dim = cfg['dim']
-        kernel = cfg.get('style_tcn_kernel', 5)
-        num_heads = cfg.get('style_head', 2)
-        dropout = cfg.get('dropout', 0.1)
+        hidden = spk_cfg.get('style_hidden', 128)
+        out_dim = cfg['dimension']
+        kernel = spk_cfg.get('style_tcn_kernel', 5)
+        num_heads = spk_cfg.get('style_head', 2)
+        dropout = spk_cfg.get('dropout', 0.1)
 
         # 1) Spectral processing (Linear + Mish + Dropout) x2
         self.spectral = nn.Sequential(
@@ -163,7 +166,7 @@ class ResidualBottleneck(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         bc = cfg['model']['bottleneck']
-        hidden_dim = cfg['model']['seanet']['dimension']
+        hidden_dim = cfg['model']['dimension']
         num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
         self.rvq = ResidualVectorQuantization(
             dim=hidden_dim,
@@ -188,11 +191,12 @@ class _OriginalDecoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         hidden = cfg['dimension']
-        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
-        norm = cfg.get('norm', 'weight_norm')
-        pad_mode = cfg.get('pad_mode', 'reflect')
-        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
-        self.proj_in = SConv1d(hidden, hidden * 2, cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+        sea_cfg = cfg['seanet']
+        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
+        norm = sea_cfg.get('norm', 'weight_norm')
+        pad_mode = sea_cfg.get('pad_mode', 'reflect')
+        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
+        self.proj_in = SConv1d(hidden, hidden * 2, sea_cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
         self.lstm = nn.LSTM(hidden * 2, hidden // 2, lstm_layers, batch_first=True, bidirectional=True)
         ch = [hidden, 256, 128, 64, 1]
         self.blocks = nn.ModuleList([_OriginalConvBlock(ch[i], ch[i + 1], s, transpose=True, norm=norm, pad_mode=pad_mode) for i, s in enumerate(strides)])
@@ -208,17 +212,18 @@ class _OriginalDecoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
-        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
-        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
-        self.use_seanet = cfg.get('enable_seanet', False)
+        sea_cfg = cfg['seanet']
+        strides = sea_cfg.get('strides', sea_cfg.get('ratios', [8, 5, 4, 2]))
+        lstm_layers = sea_cfg.get('lstm_layers', sea_cfg.get('lstm', 2))
+        self.use_seanet = sea_cfg.get('enable_seanet', False)
         self.model = _SEANetDecoder(
-            channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
-            n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
-            activation_params=cfg.get('activation_params', {'alpha': 1.0}), final_activation=cfg.get('final_activation', 'Tanh'),
-            final_activation_params=cfg.get('final_activation_params', {}), norm=cfg.get('norm', 'weight_norm'), norm_params=cfg.get('norm_params', {}),
-            kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7), residual_kernel_size=cfg.get('residual_kernel_size', 3),
-            dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False), pad_mode=cfg.get('pad_mode', 'reflect'),
-            true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2), lstm=lstm_layers, trim_right_ratio=cfg.get('trim_right_ratio', 1.0),
+            channels=sea_cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=sea_cfg.get('n_filters', 64),
+            n_residual_layers=sea_cfg.get('n_residual_layers', 1), ratios=strides, activation=sea_cfg.get('activation', 'ELU'),
+            activation_params=sea_cfg.get('activation_params', {'alpha': 1.0}), final_activation=sea_cfg.get('final_activation', 'Tanh'),
+            final_activation_params=sea_cfg.get('final_activation_params', {}), norm=sea_cfg.get('norm', 'weight_norm'), norm_params=sea_cfg.get('norm_params', {}),
+            kernel_size=sea_cfg.get('kernel_size', 7), last_kernel_size=sea_cfg.get('last_kernel_size', 7), residual_kernel_size=sea_cfg.get('residual_kernel_size', 3),
+            dilation_base=sea_cfg.get('dilation_base', 2), causal=sea_cfg.get('causal', False), pad_mode=sea_cfg.get('pad_mode', 'reflect'),
+            true_skip=sea_cfg.get('true_skip', False), compress=sea_cfg.get('compress', 2), lstm=lstm_layers, trim_right_ratio=sea_cfg.get('trim_right_ratio', 1.0),
             bidirectional=False,
         ) if self.use_seanet else _OriginalDecoder(cfg)
 

@@ -24,10 +24,10 @@ class AnonSystem(pl.LightningModule):
         self.num_speakers = num_speakers
         
         # 核心编解码模块
-        self.enc = SpeechEncoder(cfg['model']['seanet'])
-        self.spk_enc = SpeakerEncoder({**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']})
+        self.enc = SpeechEncoder(cfg['model'])
+        self.spk_enc = SpeakerEncoder(cfg['model'])
         self.bottleneck = ResidualBottleneck(cfg)
-        self.dec = Decoder(cfg['model']['seanet'])
+        self.dec = Decoder(cfg['model'])
         self.disc = Discriminator(cfg.get('discriminator', {}))
         
         # 教师模型按需加载（缓存开启时跳过，节省 ~1.5GB 显存）
@@ -40,8 +40,8 @@ class AnonSystem(pl.LightningModule):
             self.kmeans = None
             
         # 损失函数
-        bottleneck_dim = cfg['model']['seanet']['dimension']
-        self.l_spk = SpkDistillLoss(cfg['model']['speaker']['dim'], num_speakers)
+        bottleneck_dim = cfg['model']['dimension']
+        self.l_spk = SpkDistillLoss(cfg['model']['dimension'], num_speakers)
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], bottleneck_dim)
         
         self.f0_type = cfg['losses'].get('f0_type', 'log')

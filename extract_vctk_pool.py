@@ -6,8 +6,7 @@ from utils import compute_mel, get_stft_params
 import torch.nn.functional as F
 
 def load_speaker_encoder(ckpt_path, cfg):
-    spk_cfg = {**cfg['model']['speaker'], 'n_mels': cfg['model']['n_mels']}
-    encoder = SpeakerEncoder(spk_cfg).eval()
+    encoder = SpeakerEncoder(cfg['model']).eval()
     state_dict = torch.load(ckpt_path, map_location='cpu')
     raw_dict = state_dict.get('state_dict', state_dict)
     # 严格过滤 spk_enc. 前缀

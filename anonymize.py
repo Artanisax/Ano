@@ -39,7 +39,7 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         # 根据经验分布生成 s_hat，防止高斯白噪声数值主导
         pool_mean = vctk_pool.mean(dim=0, keepdim=True)
         pool_std = vctk_pool.std(dim=0, keepdim=True)
-        s_hat = torch.randn(1, model.cfg['model']['speaker']['dim'], device=device)
+        s_hat = torch.randn(1, model.cfg['model']['dimension'], device=device)
         s_hat = s_hat * pool_std + pool_mean
         
         s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]

@@ -62,6 +62,7 @@ class SpeechEncoder(nn.Module):
         super().__init__()
         strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        # Our original encoder/decoder remains the default; SEANet is an optional extension.
         self.use_seanet = cfg.get('enable_seanet', False)
         self.model = _SEANetEncoder(
             channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
@@ -214,7 +215,7 @@ class Decoder(nn.Module):
         super().__init__()
         strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
-        self.use_seanet = cfg.get('enable_seanet', True)
+        self.use_seanet = cfg.get('enable_seanet', False)
         self.model = _SEANetDecoder(
             channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
             n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),

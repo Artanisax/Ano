@@ -43,7 +43,7 @@ model:
     n_q: 8
     decay: 0.99
     commitment_weight: 1
-    kmeans_init: false
+    kmeans_init: true
     threshold_ema_dead_code: 2.0
 
 training:

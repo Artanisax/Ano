@@ -87,9 +87,9 @@ losses:
     - [512, 80, 320]
 
 discriminator:
-  enable_mpd: false
-  enable_msd: false
-  enable_mstft: true
+  enable_mpd: true
+  enable_msd: true
+  enable_mstft: false
 
 preprocess:
   f0_min: 60.0

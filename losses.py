@@ -94,7 +94,6 @@ class STFTLoss(nn.Module):
         return F.l1_loss(x_log, y_log) + F.mse_loss(x_log, y_log)
 
 class MultiResolutionSTFTLoss(nn.Module):
-    """✅ 支持从配置传入 resolutions 参数"""
     def __init__(self, resolutions: list = None):
         super().__init__()
         if resolutions is None:
@@ -131,12 +130,10 @@ class AdvLoss(nn.Module):
 
             fm_loss = 0.0
             for fr_list, fg_list in zip(fmap_real, fmap_fake):
-                branch_fm_loss = 0.0
                 for fr, fg in zip(fr_list, fg_list):
-                    branch_fm_loss += torch.mean(torch.abs(fr - fg))
-                fm_loss += branch_fm_loss / len(fr_list)
+                    fm_loss += torch.mean(torch.abs(fr - fg))
             
-            total = l_adv + fm_loss
+            total = l_adv + 2.0 * fm_loss
             if return_components:
                 return total, l_adv, fm_loss
             return total

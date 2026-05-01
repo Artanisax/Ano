@@ -6,6 +6,8 @@ from transformers import WavLMModel
 from quantization.core_vq import ResidualVectorQuantization
 from discriminators import MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiScaleSTFTDiscriminator
 
+LRELU_SLOPE = 0.1
+
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, stride: int, kernel: int = None, transpose: bool = False):
         super().__init__()

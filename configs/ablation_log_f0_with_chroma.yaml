@@ -61,7 +61,7 @@ training:
   target_samples: 64000
   val_check_interval: 0.2
   val_check_interval: 0.2
-  early_stop_patience: 5
+  early_stop_patience: 8
   early_stop_monitor: "val/rec"
   early_stop_mode: "min"
   log_every_n_steps: 100

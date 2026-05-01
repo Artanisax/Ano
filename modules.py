@@ -4,25 +4,38 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from transformers import WavLMModel
-from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder, SConv1d, SConvTranspose1d
+from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder, SConv1d, SConvTranspose1d, SLSTM
+from seanet.seanet import SEANetResnetBlock
 from quantization.core_vq import ResidualVectorQuantization
 from discriminators import MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiScaleSTFTDiscriminator
 
 class _OriginalConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, stride: int, transpose: bool = False, norm: str = 'weight_norm', pad_mode: str = 'reflect'):
         super().__init__()
-        self.act = nn.LeakyReLU(0.1)
-        self.res1 = SConv1d(in_ch, in_ch, 3, norm=norm, pad_mode=pad_mode)
-        self.res2 = SConv1d(in_ch, in_ch, 3, norm=norm, pad_mode=pad_mode)
+        self.res_block = SEANetResnetBlock(
+            in_ch,
+            kernel_sizes=[3, 3],
+            dilations=[1, 1],
+            activation='LeakyReLU',
+            activation_params={'negative_slope': 0.1},
+            norm=norm,
+            pad_mode=pad_mode,
+            compress=1,
+            true_skip=True,
+        )
         kernel = 2 * stride + (stride % 2)
-        self.sample = SConvTranspose1d(in_ch, out_ch, kernel, stride=stride, norm=norm) if transpose else SConv1d(in_ch, out_ch, kernel, stride=stride, norm=norm, pad_mode=pad_mode)
-        self.transpose = transpose
-        self.sample_norm = nn.Identity() if transpose else nn.GroupNorm(max(1, out_ch // 16), out_ch, eps=1e-6, affine=True)
+        self.sample = (
+            SConvTranspose1d(in_ch, out_ch, kernel, stride=stride, norm=norm)
+            if transpose else
+            SConv1d(in_ch, out_ch, kernel, stride=stride, norm=norm, pad_mode=pad_mode)
+        )
+        self.post = nn.Identity() if transpose else nn.Sequential(
+            nn.GroupNorm(max(1, out_ch // 16), out_ch, eps=1e-6, affine=True),
+            nn.LeakyReLU(0.1),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.res2(self.act(self.res1(self.act(x)))) + x
-        x = self.sample(x)
-        return x if self.transpose else self.act(self.sample_norm(x))
+        return self.post(self.sample(self.res_block(x)))
 
 class _OriginalSpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
@@ -34,36 +47,34 @@ class _OriginalSpeechEncoder(nn.Module):
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
         ch = [64, 128, 256, hidden]
         self.convs = nn.ModuleList([_OriginalConvBlock(1 if i == 0 else ch[i - 1], c, s, norm=norm, pad_mode=pad_mode) for i, (c, s) in enumerate(zip(ch, strides))])
-        self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
+        self.lstm = SLSTM(hidden, num_layers=lstm_layers, skip=False, bidirectional=True)
         self.proj = SConv1d(hidden * 2, hidden, cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         x = wav
         for c in self.convs:
             x = c(x)
-        x, _ = self.lstm(x.transpose(1, 2))
-        return self.proj(x.transpose(1, 2)).transpose(1, 2)
+        x = self.lstm(x)
+        return self.proj(x).transpose(1, 2)
 
 class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
-        if cfg.get('enable_seanet', True):
-            self.model = _SEANetEncoder(
-                channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
-                n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
-                activation_params=cfg.get('activation_params', {'alpha': 1.0}), norm=cfg.get('norm', 'weight_norm'),
-                norm_params=cfg.get('norm_params', {}), kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7),
-                residual_kernel_size=cfg.get('residual_kernel_size', 3), dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False),
-                pad_mode=cfg.get('pad_mode', 'reflect'), true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2),
-                lstm=lstm_layers, bidirectional=cfg.get('bidirectional', True),
-            )
-        else:
-            self.model = _OriginalSpeechEncoder(cfg)
+        self.use_seanet = cfg.get('enable_seanet', False)
+        self.model = _SEANetEncoder(
+            channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
+            n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
+            activation_params=cfg.get('activation_params', {'alpha': 1.0}), norm=cfg.get('norm', 'weight_norm'),
+            norm_params=cfg.get('norm_params', {}), kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7),
+            residual_kernel_size=cfg.get('residual_kernel_size', 3), dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False),
+            pad_mode=cfg.get('pad_mode', 'reflect'), true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2),
+            lstm=lstm_layers, bidirectional=cfg.get('bidirectional', True),
+        ) if self.use_seanet else _OriginalSpeechEncoder(cfg)
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        return self.model(wav).transpose(1, 2) if self.model(wav).dim() == 3 and self.model(wav).shape[1] == self.model(wav).shape[1] else self.model(wav)
+        return self.model(wav).transpose(1, 2) if self.use_seanet else self.model(wav)
 
 class Conv1dGLU(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dropout: float):

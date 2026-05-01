@@ -30,7 +30,7 @@ training:
   max_epochs: 10
   lr_g: 2.0e-4
   lr_d: 2.0e-4
-  gamma: 0.8
+  gamma: 0.9
   betas: [0.8, 0.99]
   weight_decay: 1.0e-5
   train_num_workers: 20

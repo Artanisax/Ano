@@ -4,40 +4,66 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from transformers import WavLMModel
-from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder
+from seanet import SEANetEncoder as _SEANetEncoder, SEANetDecoder as _SEANetDecoder, SConv1d, SConvTranspose1d
 from quantization.core_vq import ResidualVectorQuantization
 from discriminators import MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiScaleSTFTDiscriminator
+
+class _OriginalConvBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, stride: int, transpose: bool = False, norm: str = 'weight_norm', pad_mode: str = 'reflect'):
+        super().__init__()
+        self.act = nn.LeakyReLU(0.1)
+        self.res1 = SConv1d(in_ch, in_ch, 3, norm=norm, pad_mode=pad_mode)
+        self.res2 = SConv1d(in_ch, in_ch, 3, norm=norm, pad_mode=pad_mode)
+        kernel = 2 * stride + (stride % 2)
+        self.sample = SConvTranspose1d(in_ch, out_ch, kernel, stride=stride, norm=norm) if transpose else SConv1d(in_ch, out_ch, kernel, stride=stride, norm=norm, pad_mode=pad_mode)
+        self.transpose = transpose
+        self.sample_norm = nn.Identity() if transpose else nn.GroupNorm(max(1, out_ch // 16), out_ch, eps=1e-6, affine=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.res2(self.act(self.res1(self.act(x)))) + x
+        x = self.sample(x)
+        return x if self.transpose else self.act(self.sample_norm(x))
+
+class _OriginalSpeechEncoder(nn.Module):
+    def __init__(self, cfg: dict):
+        super().__init__()
+        hidden = cfg['dimension']
+        strides = list(reversed(cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))))
+        norm = cfg.get('norm', 'weight_norm')
+        pad_mode = cfg.get('pad_mode', 'reflect')
+        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        ch = [64, 128, 256, hidden]
+        self.convs = nn.ModuleList([_OriginalConvBlock(1 if i == 0 else ch[i - 1], c, s, norm=norm, pad_mode=pad_mode) for i, (c, s) in enumerate(zip(ch, strides))])
+        self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
+        self.proj = SConv1d(hidden * 2, hidden, cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+
+    def forward(self, wav: torch.Tensor) -> torch.Tensor:
+        x = wav
+        for c in self.convs:
+            x = c(x)
+        x, _ = self.lstm(x.transpose(1, 2))
+        return self.proj(x.transpose(1, 2)).transpose(1, 2)
 
 class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
-        self.model = _SEANetEncoder(
-            channels=cfg.get('channels', 1),
-            dimension=cfg['dimension'],
-            n_filters=cfg.get('n_filters', 64),
-            n_residual_layers=cfg.get('n_residual_layers', 1),
-            ratios=strides,
-            activation=cfg.get('activation', 'ELU'),
-            activation_params=cfg.get('activation_params', {'alpha': 1.0}),
-            norm=cfg.get('norm', 'weight_norm'),
-            norm_params=cfg.get('norm_params', {}),
-            kernel_size=cfg.get('kernel_size', 7),
-            last_kernel_size=cfg.get('last_kernel_size', 7),
-            residual_kernel_size=cfg.get('residual_kernel_size', 3),
-            dilation_base=cfg.get('dilation_base', 2),
-            causal=cfg.get('causal', False),
-            pad_mode=cfg.get('pad_mode', 'reflect'),
-            true_skip=cfg.get('true_skip', False),
-            compress=cfg.get('compress', 2),
-            lstm=lstm_layers,
-            bidirectional=cfg.get('bidirectional', True),
-        )
-    
+        if cfg.get('enable_seanet', True):
+            self.model = _SEANetEncoder(
+                channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
+                n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
+                activation_params=cfg.get('activation_params', {'alpha': 1.0}), norm=cfg.get('norm', 'weight_norm'),
+                norm_params=cfg.get('norm_params', {}), kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7),
+                residual_kernel_size=cfg.get('residual_kernel_size', 3), dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False),
+                pad_mode=cfg.get('pad_mode', 'reflect'), true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2),
+                lstm=lstm_layers, bidirectional=cfg.get('bidirectional', True),
+            )
+        else:
+            self.model = _OriginalSpeechEncoder(cfg)
+
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        # Legacy output contract: [B, T_feat, hidden]
-        return self.model(wav).transpose(1, 2)
+        return self.model(wav).transpose(1, 2) if self.model(wav).dim() == 3 and self.model(wav).shape[1] == self.model(wav).shape[1] else self.model(wav)
 
 class Conv1dGLU(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dropout: float):
@@ -151,39 +177,46 @@ class ResidualBottleneck(nn.Module):
         out = self.proj_out(quantized_out.transpose(1, 2))
         return out, q1, q2, com
 
+class _OriginalDecoder(nn.Module):
+    def __init__(self, cfg: dict):
+        super().__init__()
+        hidden = cfg['dimension']
+        strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
+        norm = cfg.get('norm', 'weight_norm')
+        pad_mode = cfg.get('pad_mode', 'reflect')
+        lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        self.proj_in = SConv1d(hidden, hidden * 2, cfg.get('last_kernel_size', 7), norm=norm, pad_mode=pad_mode)
+        self.lstm = nn.LSTM(hidden * 2, hidden // 2, lstm_layers, batch_first=True, bidirectional=True)
+        ch = [hidden, 256, 128, 64, 1]
+        self.blocks = nn.ModuleList([_OriginalConvBlock(ch[i], ch[i + 1], s, transpose=True, norm=norm, pad_mode=pad_mode) for i, s in enumerate(strides)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj_in(x.transpose(1, 2)).transpose(1, 2)
+        x, _ = self.lstm(x)
+        x = x.transpose(1, 2)
+        for b in self.blocks:
+            x = b(x)
+        return torch.tanh(x.squeeze(1))
+
 class Decoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
         strides = cfg.get('strides', cfg.get('ratios', [8, 5, 4, 2]))
         lstm_layers = cfg.get('lstm_layers', cfg.get('lstm', 2))
+        self.use_seanet = cfg.get('enable_seanet', True)
         self.model = _SEANetDecoder(
-            channels=cfg.get('channels', 1),
-            dimension=cfg['dimension'],
-            n_filters=cfg.get('n_filters', 64),
-            n_residual_layers=cfg.get('n_residual_layers', 1),
-            ratios=strides,
-            activation=cfg.get('activation', 'ELU'),
-            activation_params=cfg.get('activation_params', {'alpha': 1.0}),
-            final_activation=cfg.get('final_activation', 'Tanh'),
-            final_activation_params=cfg.get('final_activation_params', {}),
-            norm=cfg.get('norm', 'weight_norm'),
-            norm_params=cfg.get('norm_params', {}),
-            kernel_size=cfg.get('kernel_size', 7),
-            last_kernel_size=cfg.get('last_kernel_size', 7),
-            residual_kernel_size=cfg.get('residual_kernel_size', 3),
-            dilation_base=cfg.get('dilation_base', 2),
-            causal=cfg.get('causal', False),
-            pad_mode=cfg.get('pad_mode', 'reflect'),
-            true_skip=cfg.get('true_skip', False),
-            compress=cfg.get('compress', 2),
-            lstm=lstm_layers,
-            trim_right_ratio=cfg.get('trim_right_ratio', 1.0),
+            channels=cfg.get('channels', 1), dimension=cfg['dimension'], n_filters=cfg.get('n_filters', 64),
+            n_residual_layers=cfg.get('n_residual_layers', 1), ratios=strides, activation=cfg.get('activation', 'ELU'),
+            activation_params=cfg.get('activation_params', {'alpha': 1.0}), final_activation=cfg.get('final_activation', 'Tanh'),
+            final_activation_params=cfg.get('final_activation_params', {}), norm=cfg.get('norm', 'weight_norm'), norm_params=cfg.get('norm_params', {}),
+            kernel_size=cfg.get('kernel_size', 7), last_kernel_size=cfg.get('last_kernel_size', 7), residual_kernel_size=cfg.get('residual_kernel_size', 3),
+            dilation_base=cfg.get('dilation_base', 2), causal=cfg.get('causal', False), pad_mode=cfg.get('pad_mode', 'reflect'),
+            true_skip=cfg.get('true_skip', False), compress=cfg.get('compress', 2), lstm=lstm_layers, trim_right_ratio=cfg.get('trim_right_ratio', 1.0),
             bidirectional=False,
-        )
+        ) if self.use_seanet else _OriginalDecoder(cfg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Legacy input contract: [B, T_feat, hidden]
-        return self.model(x.transpose(1, 2)).squeeze(1)
+        return self.model(x.transpose(1, 2)).squeeze(1) if self.use_seanet else self.model(x)
 
 class WavLMExtractor(nn.Module):
     def __init__(self, name: str = "microsoft/wavlm-large", layer: int = 12):

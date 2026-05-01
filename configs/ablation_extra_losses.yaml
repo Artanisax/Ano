@@ -8,6 +8,7 @@ model:
   win_length: 1280
   n_fft: 1280
   seanet:
+    enable_seanet: true
     channels: 1
     dimension: 512
     n_filters: 64

@@ -121,6 +121,15 @@ class AnonSystem(pl.LightningModule):
         
         # 使用 s1 作为跨片段的说话人身份源，避免退化成当前片段条件向量捷径
         r1 = feat_main - spk_s1.unsqueeze(1)           # [B, T_feat, 512]
+        if self._factor_debug_prints_left > 0:
+            with torch.no_grad():
+                print(
+                    "[FACTOR DEBUG] "
+                    f"feat_mean={feat_main.abs().mean().item():.4e} feat_std={feat_main.std().item():.4e} feat_max={feat_main.abs().max().item():.4e} "
+                    f"spk_mean={spk_s1.abs().mean().item():.4e} spk_std={spk_s1.std().item():.4e} spk_max={spk_s1.abs().max().item():.4e} "
+                    f"r1_mean={r1.abs().mean().item():.4e} r1_std={r1.std().item():.4e} r1_max={r1.abs().max().item():.4e}"
+                )
+            self._factor_debug_prints_left -= 1
         recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
         
         recon_with_spk = recon + spk_s1.unsqueeze(1)   # [B, T_feat, 512]

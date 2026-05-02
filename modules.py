@@ -169,15 +169,26 @@ class ResidualBottleneck(nn.Module):
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
             commitment_weight=bc['commitment_weight'],
         )
-        self._debug_prints_left = int(bc.get('debug_prints', 200))
+        self._debug_prints_left = int(bc.get('debug_prints', 1000))
 
     def forward(self, x: torch.Tensor):
         # x: [B, T, D]
-        quantized_out, _, commit_loss, all_codes = self.rvq(x, return_all_codes=True)
-        com = commit_loss.sum()
+        residual = x
+        quantized_out = torch.zeros_like(x)
+        tapped_quantized = {}
+        commit_losses = []
 
-        q1 = all_codes[0] if all_codes.shape[0] > 0 else torch.zeros_like(x)
-        q2 = all_codes[1] if all_codes.shape[0] > 1 else torch.zeros_like(x)
+        for i, layer in enumerate(self.rvq.layers[:self.num_quantizers]):
+            quantized_i, _, commit_i = layer(residual)
+            residual = residual - quantized_i
+            quantized_out = quantized_out + quantized_i
+            commit_losses.append(commit_i.reshape(-1).mean())
+            if i in self.tap_layers:
+                tapped_quantized[i] = quantized_i
+
+        com = torch.stack(commit_losses).sum() if commit_losses else torch.tensor(0.0, device=x.device)
+        q1 = tapped_quantized.get(0, torch.zeros_like(x))
+        q2 = tapped_quantized.get(1, torch.zeros_like(x))
 
         if self._debug_prints_left > 0:
             with torch.no_grad():
@@ -186,7 +197,7 @@ class ResidualBottleneck(nn.Module):
                     f"x_mean={x.abs().mean().item():.4e} x_std={x.std().item():.4e} x_max={x.abs().max().item():.4e} "
                     f"q_mean={quantized_out.abs().mean().item():.4e} q_std={quantized_out.std().item():.4e} "
                     f"q1_mean={q1.abs().mean().item():.4e} q2_mean={q2.abs().mean().item():.4e} "
-                    f"commit_shape={tuple(commit_loss.shape)} commit={commit_loss.detach().cpu().tolist()} com={com.item():.4e}"
+                    f"commit_layers={[round(v.item(), 6) for v in commit_losses]} com={com.item():.4e}"
                 )
             self._debug_prints_left -= 1
 

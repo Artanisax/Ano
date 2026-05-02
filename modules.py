@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import WavLMModel
-from quantization.core_vq import ResidualVectorQuantization
+from vector_quantize_pytorch import ResidualVQ
 from discriminators import MultiPeriodDiscriminator, MultiScaleDiscriminator, MultiScaleSTFTDiscriminator
 
 LRELU_SLOPE = 0.1
@@ -157,11 +157,12 @@ class ResidualBottleneck(nn.Module):
         super().__init__()
         bc = cfg['model']['bottleneck']
         hidden_dim = cfg['model']['dimension']
-        num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
-        self.rvq = ResidualVectorQuantization(
+        self.num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
+        self.tap_layers = (0, 1)
+        self.rvq = ResidualVQ(
             dim=hidden_dim,
             codebook_size=bc['codebook_size'],
-            num_quantizers=num_quantizers,
+            num_quantizers=self.num_quantizers,
             decay=bc['decay'],
             kmeans_init=bc['kmeans_init'],
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
@@ -169,11 +170,23 @@ class ResidualBottleneck(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        h = x.transpose(1, 2)
-        quantized_out, _, losses, quantized_list = self.rvq(h, layers=[0, 1])
-        com = losses.mean() if losses.numel() > 0 else torch.tensor(0.0, device=x.device)
-        q1 = quantized_list[0].transpose(1, 2)
-        q2 = quantized_list[1].transpose(1, 2) if len(quantized_list) > 1 else torch.zeros_like(q1)
+        h = x.transpose(1, 2)  # [B, T, D]
+        residual = h
+        quantized_out = torch.zeros_like(h)
+        tapped_quantized = {}
+        commit_losses = []
+
+        for i, layer in enumerate(self.rvq.layers[:self.num_quantizers]):
+            quantized_i, _, commit_i = layer(residual)
+            residual = residual - quantized_i
+            quantized_out = quantized_out + quantized_i
+            commit_losses.append(commit_i.reshape(-1).mean())
+            if i in self.tap_layers:
+                tapped_quantized[i] = quantized_i
+
+        com = torch.stack(commit_losses).mean() if commit_losses else torch.tensor(0.0, device=x.device)
+        q1 = tapped_quantized.get(0, torch.zeros_like(h)).transpose(1, 2)
+        q2 = tapped_quantized.get(1, torch.zeros_like(h)).transpose(1, 2)
         out = quantized_out.transpose(1, 2)
         return out, q1, q2, com
 

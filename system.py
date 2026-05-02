@@ -62,7 +62,7 @@ class AnonSystem(pl.LightningModule):
         self.l_adv = AdvLoss()
         
         self.automatic_optimization = False
-        self._factor_debug_prints_left = int(cfg['model']['bottleneck'].get('debug_prints', 200))
+        self._factor_debug_prints_left = int(cfg['model']['bottleneck'].get('debug_prints', 0))
 
     @staticmethod
     def _set_requires_grad(module: nn.Module, flag: bool):

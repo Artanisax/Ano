@@ -10,6 +10,7 @@ import joblib
 import numpy as np
 import torch
 import yaml
+from tqdm import tqdm
 from transformers import AutoFeatureExtractor, WavLMModel
 
 from utils import load_audio
@@ -199,7 +200,12 @@ def verify_manifest(
     total_mismatch_frames = 0
 
     with torch.no_grad():
-        for start in range(0, len(items), batch_size):
+        for start in tqdm(
+            range(0, len(items), batch_size),
+            desc=f"Verifying {os.path.basename(manifest_path)}",
+            unit="batch",
+            leave=False,
+        ):
             batch_items = items[start:start + batch_size]
             batch_wavs = []
             batch_lengths = []

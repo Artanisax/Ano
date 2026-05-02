@@ -169,26 +169,26 @@ class ResidualBottleneck(nn.Module):
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
             commitment_weight=bc['commitment_weight'],
         )
+        self._debug_prints_left = int(bc.get('debug_prints', 5))
 
     def forward(self, x: torch.Tensor):
         # x: [B, T, D]
         quantized_out, _, commit_loss, all_codes = self.rvq(x, return_all_codes=True)
-
-        if commit_loss.ndim == 0:
-            com = commit_loss
-        elif commit_loss.ndim == 1:
-            com = commit_loss.sum() if commit_loss.shape[0] == self.num_quantizers else commit_loss.mean()
-        else:
-            if commit_loss.shape[-1] == self.num_quantizers:
-                commit_by_q = commit_loss
-            elif commit_loss.shape[0] == self.num_quantizers:
-                commit_by_q = commit_loss.movedim(0, -1)
-            else:
-                commit_by_q = commit_loss
-            com = commit_by_q.sum(dim=-1).mean() if commit_by_q.shape[-1] == self.num_quantizers else commit_by_q.mean()
+        com = commit_loss.sum()
 
         q1 = all_codes[0] if all_codes.shape[0] > 0 else torch.zeros_like(x)
         q2 = all_codes[1] if all_codes.shape[0] > 1 else torch.zeros_like(x)
+
+        if self._debug_prints_left > 0:
+            with torch.no_grad():
+                print(
+                    "[RVQ DEBUG] "
+                    f"x_mean={x.abs().mean().item():.4e} x_std={x.std().item():.4e} x_max={x.abs().max().item():.4e} "
+                    f"q_mean={quantized_out.abs().mean().item():.4e} q_std={quantized_out.std().item():.4e} "
+                    f"q1_mean={q1.abs().mean().item():.4e} q2_mean={q2.abs().mean().item():.4e} "
+                    f"commit_shape={tuple(commit_loss.shape)} commit={commit_loss.detach().cpu().tolist()} com={com.item():.4e}"
+                )
+            self._debug_prints_left -= 1
 
         return quantized_out, q1, q2, com
 

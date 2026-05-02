@@ -171,23 +171,19 @@ class ResidualBottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor):
         h = x.transpose(1, 2)  # [B, T, D]
-        residual = h
-        quantized_out = torch.zeros_like(h)
-        tapped_quantized = {}
-        commit_losses = []
+        quantized_out, _, commit_loss, all_codes = self.rvq(h, return_all_codes=True)
 
-        for i, layer in enumerate(self.rvq.layers[:self.num_quantizers]):
-            quantized_i, _, commit_i = layer(residual)
-            residual = residual - quantized_i
-            quantized_out = quantized_out + quantized_i
-            commit_losses.append(commit_i.reshape(-1).mean())
-            if i in self.tap_layers:
-                tapped_quantized[i] = quantized_i
+        if commit_loss.ndim > 1:
+            com = commit_loss.sum(dim=-1).mean()
+        else:
+            com = commit_loss.sum()
 
-        com = torch.stack(commit_losses).sum() if commit_losses else torch.tensor(0.0, device=x.device)
-        q1 = tapped_quantized.get(0, torch.zeros_like(h)).transpose(1, 2)
-        q2 = tapped_quantized.get(1, torch.zeros_like(h)).transpose(1, 2)
+        q1 = all_codes[0] if all_codes.shape[0] > 0 else torch.zeros_like(h)
+        q2 = all_codes[1] if all_codes.shape[0] > 1 else torch.zeros_like(h)
+
         out = quantized_out.transpose(1, 2)
+        q1 = q1.transpose(1, 2)
+        q2 = q2.transpose(1, 2)
         return out, q1, q2, com
 
 class Decoder(nn.Module):

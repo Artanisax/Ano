@@ -184,7 +184,7 @@ class ResidualBottleneck(nn.Module):
             if i in self.tap_layers:
                 tapped_quantized[i] = quantized_i
 
-        com = torch.stack(commit_losses).mean() if commit_losses else torch.tensor(0.0, device=x.device)
+        com = torch.stack(commit_losses).sum() if commit_losses else torch.tensor(0.0, device=x.device)
         q1 = tapped_quantized.get(0, torch.zeros_like(h)).transpose(1, 2)
         q2 = tapped_quantized.get(1, torch.zeros_like(h)).transpose(1, 2)
         out = quantized_out.transpose(1, 2)

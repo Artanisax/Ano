@@ -165,6 +165,7 @@ class ResidualBottleneck(nn.Module):
             num_quantizers=self.num_quantizers,
             decay=bc['decay'],
             kmeans_init=bc['kmeans_init'],
+            kmeans_iters=bc['kmeans_iters'],
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
             commitment_weight=bc['commitment_weight'],
         )

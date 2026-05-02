@@ -22,7 +22,7 @@ model:
     decay: 0.99
     commitment_weight: 1.0
     kmeans_init: true
-    kmeans_iters: 100
+    kmeans_iters: 50
     threshold_ema_dead_code: 2
 
 training:

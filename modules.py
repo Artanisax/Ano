@@ -169,7 +169,7 @@ class ResidualBottleneck(nn.Module):
             threshold_ema_dead_code=int(bc['threshold_ema_dead_code']),
             commitment_weight=bc['commitment_weight'],
         )
-        self._debug_prints_left = int(bc.get('debug_prints', 1000))
+        self._debug_prints_left = int(bc.get('debug_prints', 0))
 
     def forward(self, x: torch.Tensor):
         # x: [B, T, D]

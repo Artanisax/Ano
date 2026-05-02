@@ -171,13 +171,21 @@ class ResidualBottleneck(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        # [B, T, D]
+        # x: [B, T, D]
         quantized_out, _, commit_loss, all_codes = self.rvq(x, return_all_codes=True)
 
-        if commit_loss.ndim > 1:
-            com = commit_loss.sum(dim=-1).mean()
+        if commit_loss.ndim == 0:
+            com = commit_loss
+        elif commit_loss.ndim == 1:
+            com = commit_loss.sum() if commit_loss.shape[0] == self.num_quantizers else commit_loss.mean()
         else:
-            com = commit_loss.sum()
+            if commit_loss.shape[-1] == self.num_quantizers:
+                commit_by_q = commit_loss
+            elif commit_loss.shape[0] == self.num_quantizers:
+                commit_by_q = commit_loss.movedim(0, -1)
+            else:
+                commit_by_q = commit_loss
+            com = commit_by_q.sum(dim=-1).mean() if commit_by_q.shape[-1] == self.num_quantizers else commit_by_q.mean()
 
         q1 = all_codes[0] if all_codes.shape[0] > 0 else torch.zeros_like(x)
         q2 = all_codes[1] if all_codes.shape[0] > 1 else torch.zeros_like(x)

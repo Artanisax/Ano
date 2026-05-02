@@ -223,6 +223,7 @@ class Decoder(nn.Module):
         x = x.transpose(1, 2)
         for b in self.blocks:
             x = b(x)
+        x = x - x.mean(dim=-1, keepdim=True)
         return torch.tanh(x.squeeze(1))
 
 class WavLMExtractor(nn.Module):

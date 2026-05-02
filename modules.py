@@ -17,7 +17,7 @@ class ConvBlock(nn.Module):
         self.res_conv2 = nn.utils.weight_norm(
             nn.Conv1d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, padding_mode='reflect')
         )
-        self.act = nn.LeakyReLU(LRELU_SLOPE)
+        self.act = nn.Identity() if (transpose and out_ch == 1) else nn.LeakyReLU(LRELU_SLOPE)
         auto_kernel = kernel is None
         if kernel is None:
             kernel = 2 * stride + (stride % 2)
@@ -223,7 +223,6 @@ class Decoder(nn.Module):
         x = x.transpose(1, 2)
         for b in self.blocks:
             x = b(x)
-        x = x - x.mean(dim=-1, keepdim=True)
         return torch.tanh(x.squeeze(1))
 
 class WavLMExtractor(nn.Module):

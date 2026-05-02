@@ -23,7 +23,7 @@ model:
     commitment_weight: 1.0
     kmeans_init: true
     kmeans_iters: 100
-    threshold_ema_dead_code: 2.0
+    threshold_ema_dead_code: 2
 
 training:
   batch_size: 32

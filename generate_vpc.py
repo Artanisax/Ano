@@ -11,7 +11,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from system import AnonSystem
-from utils import save_audio, compute_mel, normalize_audio, get_stft_params
+from utils import save_audio, compute_mel, normalize_audio, get_stft_params, setup_seed
 
 def read_kaldi_format(filename):
     """读取 Kaldi 格式的文件 (如 wav.scp, utt2spk)"""
@@ -198,6 +198,7 @@ def main():
                         help='需要处理的 VPC 数据集名称列表')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数')
+    parser.add_argument('--seed', type=int, default=None, help='随机种子；不传则使用配置文件中的 random_seed')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     args = parser.parse_args()
 
@@ -205,7 +206,11 @@ def main():
     print(f"🚀 初始化 VPC 2024 评测生成管道")
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-        
+
+    seed = cfg.get('random_seed', 42) if args.seed is None else args.seed
+    setup_seed(seed)
+    print(f"🎲 随机种子: {seed}")
+
     print(f"🔹 加载检查点: {args.ckpt}")
     ckpt = torch.load(args.ckpt, map_location='cpu')
     num_speakers = ckpt['state_dict']['l_spk.clf.weight'].shape[0]

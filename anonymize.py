@@ -3,7 +3,7 @@ import yaml, torch, argparse, os, glob, json
 from pathlib import Path
 from tqdm import tqdm
 from system import AnonSystem
-from utils import load_audio, save_audio, compute_mel, normalize_audio, get_stft_params
+from utils import load_audio, save_audio, compute_mel, normalize_audio, get_stft_params, setup_seed
 import torch.nn.functional as F
 
 def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: int):
@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--output', default='outputs/Ano', help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用配置文件')
+    parser.add_argument('--seed', type=int, default=None, help='随机种子；不传则使用配置文件中的 random_seed')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     parser.add_argument('--ext', nargs='+', default=['.wav', '.flac'], help='支持的音频扩展名')
     args = parser.parse_args()
@@ -78,7 +79,11 @@ def main():
     # ───────── 2. 模型与配置加载 ─────────
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-        
+
+    seed = cfg.get('random_seed', 42) if args.seed is None else args.seed
+    setup_seed(seed)
+    print(f"🎲 随机种子: {seed}")
+
     print(f"🔹 加载检查点: {args.ckpt}")
     ckpt = torch.load(args.ckpt, map_location='cpu')
     num_speakers = ckpt['state_dict']['l_spk.clf.weight'].shape[0]

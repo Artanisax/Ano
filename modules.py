@@ -51,10 +51,10 @@ class ConvBlock(nn.Module):
 class SpeechEncoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
-        enc_cfg = cfg.get('speechencoder', {})
+        dec_cfg = cfg.get('speech', {})
         hidden = cfg['dimension']
-        strides = list(reversed(enc_cfg.get('strides', [8, 5, 4, 2])))
-        lstm_layers = enc_cfg.get('lstm_layers', 2)
+        strides = list(reversed(dec_cfg.get('strides', [8, 5, 4, 2])))
+        lstm_layers = dec_cfg.get('lstm_layers', 2)
         ch = [64, 128, 256, hidden]
         self.convs = nn.ModuleList([ConvBlock(1 if i == 0 else ch[i - 1], c, stride=s) for i, (c, s) in enumerate(zip(ch, strides))])
         self.lstm = nn.LSTM(hidden, hidden, lstm_layers, batch_first=True, bidirectional=True)
@@ -190,7 +190,7 @@ class ResidualBottleneck(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
-        enc_cfg = cfg.get('speechencoder', {})
+        enc_cfg = cfg.get('speech', {})
         hidden = cfg['dimension']
         strides = enc_cfg.get('strides', [8, 5, 4, 2])
         lstm_layers = enc_cfg.get('lstm_layers', 2)

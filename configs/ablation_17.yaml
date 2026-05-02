@@ -8,7 +8,7 @@ model:
   hop_length: 320
   win_length: 1280
   n_fft: 1280
-  speechencoder:
+  speech:
     strides: [8, 5, 4, 2]
     lstm_layers: 2
   speaker:

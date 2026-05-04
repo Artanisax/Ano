@@ -43,6 +43,12 @@ class AnonSystem(pl.LightningModule):
         bottleneck_dim = cfg['model']['dimension']
         self.l_spk = SpkDistillLoss(cfg['model']['dimension'], num_speakers)
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], bottleneck_dim)
+        self.enable_qout_spk_adv = cfg['losses'].get('enable_qout_spk_adv', False)
+        self.lambda_qout_spk_adv = cfg['losses'].get('lambda_qout_spk_adv', 0.0)
+        self.qout_spk_grl_scale = cfg['losses'].get('qout_spk_grl_scale', 1.0)
+        if self.enable_qout_spk_adv:
+            hidden_dim = cfg['losses'].get('qout_spk_adv_hidden_dim', 256)
+            self.l_qout_spk = QOutSpeakerAdvLoss(bottleneck_dim, num_speakers, hidden_dim=hidden_dim)
         
         self.f0_type = cfg['losses'].get('f0_type', 'log')
         self.l_emo = EmoDistillLoss(bottleneck_dim, f0_type=self.f0_type)
@@ -121,16 +127,16 @@ class AnonSystem(pl.LightningModule):
         
         # 使用 s1 作为跨片段的说话人身份源，避免退化成当前片段条件向量捷径
         r1 = feat_main - spk_s1.unsqueeze(1)           # [B, T_feat, 512]
-        recon, q1, q2, com = self.bottleneck(r1)        # recon:[B, T_feat, 512]
+        q_out, q1, q2, com = self.bottleneck(r1)        # q_out:[B, T_feat, 512]
         
-        recon_with_spk = recon + spk_s1.unsqueeze(1)   # [B, T_feat, 512]
+        recon_with_spk = q_out + spk_s1.unsqueeze(1)   # [B, T_feat, 512]
         wav_rec = self.dec(recon_with_spk)  # [B, T_feat, hidden] -> [B, T]
         
         # 🔧 长度保护：裁剪至原始输入长度，防止转置卷积边界伪影
         if wav_rec.shape[-1] != wav_main.shape[-1]:
             wav_rec = wav_rec[..., :wav_main.shape[-1]]
 
-        return wav_rec, spk_s1, spk_s2, q1, q2, com
+        return wav_rec, spk_s1, spk_s2, q_out, q1, q2, com
 
     def training_step(self, batch: dict, batch_idx: int):
         opt_g, opt_d = self.optimizers()
@@ -144,7 +150,7 @@ class AnonSystem(pl.LightningModule):
             tokens = self.get_tokens_dynamic(wav[:, 0])
             
         # 前向传播
-        wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
+        wav_rec, spk_s1, spk_s2, q_out, q1, q2, com = self(wav)
         
         # ───────── 1. 重建损失 ─────────
         mel_gt = self._compute_mel_3d_nograd(wav[:, 0])
@@ -163,6 +169,11 @@ class AnonSystem(pl.LightningModule):
         l_spk = l_spk_ce + l_spk_cons
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
+        l_qout_spk = torch.tensor(0.0, device=wav.device)
+        qout_spk_acc = torch.tensor(0.0, device=wav.device)
+        if self.enable_qout_spk_adv:
+            l_qout_spk, qout_logits = self.l_qout_spk(q_out, spk_ids, grl_scale=self.qout_spk_grl_scale, return_logits=True)
+            qout_spk_acc = (qout_logits.argmax(dim=1) == spk_ids).float().mean()
         chroma_batch = batch.get('chroma')
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
         l_emo_chroma = self.l_chroma(q2, chroma_main) if (self.enable_chroma and chroma_main is not None) else torch.tensor(0.0, device=wav.device)
@@ -181,6 +192,7 @@ class AnonSystem(pl.LightningModule):
                  self.cfg['losses']['lambda_c'] * com + 
                  self.cfg['losses']['lambda_s'] * l_spk +
                  self.cfg['losses']['lambda_l'] * l_lin + 
+                 self.lambda_qout_spk_adv * l_qout_spk +
                  self.cfg['losses']['lambda_e_f0'] * l_emo_f0 +
                  self.cfg['losses']['lambda_e_chroma'] * l_emo_chroma +
                  self.cfg['losses']['lambda_mrstft'] * l_mrstft +
@@ -223,6 +235,8 @@ class AnonSystem(pl.LightningModule):
                 'train/spk_ce': l_spk_ce,
                 'train/spk_cons': l_spk_cons,
                 'train/lin': l_lin,
+                'train/qout_spk_adv': l_qout_spk,
+                'train/qout_spk_acc': qout_spk_acc,
                 'train/emo_f0': l_emo_f0,
                 'train/emo_chroma': l_emo_chroma,
             },
@@ -239,7 +253,7 @@ class AnonSystem(pl.LightningModule):
         if not self.use_cache:
             tokens = self.get_tokens_dynamic(wav[:, 0])
 
-        wav_rec, spk_s1, spk_s2, q1, q2, com = self(wav)
+        wav_rec, spk_s1, spk_s2, q_out, q1, q2, com = self(wav)
 
         mel_gt = self._compute_mel_3d_nograd(wav[:, 0])
         mel_rec = self._compute_mel_3d(wav_rec.unsqueeze(1))
@@ -254,6 +268,7 @@ class AnonSystem(pl.LightningModule):
         l_spk = self.l_spk.consistency_only(spk_s1, spk_s2)
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
+        l_qout_spk = torch.tensor(0.0, device=wav.device)
         chroma_batch = batch.get('chroma')
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
         l_emo_chroma = self.l_chroma(q2, chroma_main) if (self.enable_chroma and chroma_main is not None) else torch.tensor(0.0, device=wav.device)
@@ -293,6 +308,7 @@ class AnonSystem(pl.LightningModule):
                 'val/com': com,
                 'val/spk_cons': l_spk,
                 'val/lin': l_lin,
+                'val/qout_spk_adv': l_qout_spk,
                 'val/emo_f0': l_emo_f0,
                 'val/emo_chroma': l_emo_chroma,
             },

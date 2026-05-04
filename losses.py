@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Function
 
 class SpkDistillLoss(nn.Module):
     def __init__(self, dim: int, num_speakers: int):
@@ -66,6 +67,36 @@ class ChromaDistillLoss(nn.Module):
     def forward(self, q2: torch.Tensor, chroma: torch.Tensor) -> torch.Tensor:
         pred = self.proj(q2)
         return F.mse_loss(pred, chroma)
+
+class _GradReverseFn(Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float):
+        ctx.scale = scale
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.scale * grad_output, None
+
+
+class QOutSpeakerAdvLoss(nn.Module):
+    def __init__(self, dim: int, num_speakers: int, hidden_dim: int = 256):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.LeakyReLU(0.1),
+            nn.Linear(hidden_dim, num_speakers),
+        )
+
+    def forward(self, q_out: torch.Tensor, spk_ids: torch.Tensor, grl_scale: float = 1.0, return_logits: bool = False):
+        pooled = q_out.mean(dim=1)
+        pooled = _GradReverseFn.apply(pooled, grl_scale)
+        logits = self.proj(pooled)
+        loss = F.cross_entropy(logits, spk_ids.long())
+        if return_logits:
+            return loss, logits
+        return loss
+
 
 class STFTLoss(nn.Module):
     def __init__(self, fft_size: int, hop_size: int, win_size: int):

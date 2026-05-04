@@ -49,6 +49,7 @@ losses:
   lambda_c: 0.1
   lambda_s: 1.0
   lambda_l: 1.0
+  lambda_qout_spk_adv: 0.1
   lambda_e_f0: 1.0
   lambda_e_chroma: 1.0
   lambda_mrstft: 1.0
@@ -57,6 +58,9 @@ losses:
   enable_chroma: true
   enable_mrstft: false
   enable_time_l1: false
+  enable_qout_spk_adv: false
+  qout_spk_grl_scale: 1.0
+  qout_spk_adv_hidden_dim: 256
   mrstft_resolutions:
     - [2048, 320, 1280]
     - [1024, 160, 640]

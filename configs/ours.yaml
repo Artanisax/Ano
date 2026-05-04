@@ -49,7 +49,7 @@ losses:
   lambda_c: 0.1
   lambda_s: 1.0
   lambda_l: 1.0
-  lambda_qout_spk_adv: 1.0
+  lambda_qout_spk_adv: 0.1
   lambda_e_f0: 1.0
   lambda_e_chroma: 1.0
   lambda_mrstft: 1.0

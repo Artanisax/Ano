@@ -63,6 +63,7 @@ def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: i
     """
     device_type = "cuda" if device.startswith("cuda") else "cpu"
     with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        wav = wav.squeeze(1)  # [1,1,T] -> [1,T]
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav, model.cfg['model']['n_mels'], 
@@ -131,7 +132,7 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
     new_scp_lines = []
     
     for utid, wav_path_or_cmd in tqdm(scp_dict.items(), desc=f"Processing {dataset_name}"):
-        try:
+        # try:
             # 匿名化后的绝对保存路径
             out_wav_path = out_wav_dir / f"{utid}.wav"
             
@@ -160,9 +161,9 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
             # 记录新的 wav.scp 条目
             new_scp_lines.append(f"{utid} {out_wav_path.absolute()}\n")
             success += 1
-        except Exception as e:
-            tqdm.write(f"❌ 失败 {utid}: {e}")
-            fail += 1
+        # except Exception as e:
+        #     tqdm.write(f"❌ 失败 {utid}: {e}")
+        #     fail += 1
             
     # ───────── 3. 写入新的 wav.scp ─────────
     with open(out_dataset_dir / "wav.scp", 'w', encoding='utf-8') as f:

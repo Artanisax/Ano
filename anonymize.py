@@ -15,9 +15,10 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
     """
     device_type = "cuda" if device.startswith("cuda") else "cpu"
     with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        wav = wav.squeeze(1)  # [1,1,T] -> [1,T]
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
-        mel = compute_mel(wav, model.cfg['model']['n_mels'], 
+        mel = compute_mel(wav, model.cfg['model']['n_mels'],
                           model.cfg['model']['sample_rate'], **mel_params).unsqueeze(1)
         feat = model.enc(wav)                     # [1, T_feat, 512]
         s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]
@@ -154,7 +155,7 @@ def main():
         hop_length = cfg['model'].get('hop_length', 320)
         
         for f_path in tqdm(audio_files, desc="Processing", unit="file"):
-            try:
+            # try:
                 fname = Path(f_path).stem
                 out_rec_path = out_dir / f"{fname}_rec.wav"
                 out_anon_path = out_dir / f"{fname}_anon.wav"
@@ -179,9 +180,9 @@ def main():
                 save_audio(normalize_audio(wav_rec.cpu()), out_rec_path)
                 save_audio(normalize_audio(wav_anon.cpu()), out_anon_path)
                 success += 1
-            except Exception as e:
-                tqdm.write(f"❌ 失败 {Path(f_path).name}: {e}")
-                fail += 1
+            # except Exception as e:
+            #     tqdm.write(f"❌ 失败 {Path(f_path).name}: {e}")
+            #     fail += 1
                 
         print(f"\n🎉 批量完成 | 成功: {success} | 失败: {fail} | 输出目录: {out_dir}")
 

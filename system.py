@@ -206,7 +206,16 @@ class AnonSystem(pl.LightningModule):
                  
         # 优化生成器
         opt_g.zero_grad()
-        self.manual_backward(total)
+        if self.enable_qout_spk_adv and self.lambda_qout_spk_adv > 0:
+            total_main = total - self.lambda_qout_spk_adv * l_qout_spk
+            self.manual_backward(total_main, retain_graph=True)
+            spk_adv_hook = spk_s1.register_hook(lambda grad: torch.zeros_like(grad))
+            try:
+                self.manual_backward(self.lambda_qout_spk_adv * l_qout_spk)
+            finally:
+                spk_adv_hook.remove()
+        else:
+            self.manual_backward(total)
         torch.nn.utils.clip_grad_norm_(opt_g.param_groups[0]['params'], max_norm=1.0)
         opt_g.step()
 

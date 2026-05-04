@@ -47,8 +47,14 @@ class AnonSystem(pl.LightningModule):
         self.lambda_qout_spk_adv = cfg['losses'].get('lambda_qout_spk_adv', 0.0)
         self.qout_spk_grl_scale = cfg['losses'].get('qout_spk_grl_scale', 1.0)
         if self.enable_qout_spk_adv:
-            hidden_dim = cfg['losses'].get('qout_spk_adv_hidden_dim', 256)
-            self.l_qout_spk = QOutSpeakerAdvLoss(bottleneck_dim, num_speakers, hidden_dim=hidden_dim)
+            attention_channels = cfg['losses'].get('qout_spk_adv_attention_channels', 128)
+            global_context = cfg['losses'].get('qout_spk_adv_global_context', True)
+            self.l_qout_spk = QOutSpeakerAdvLoss(
+                bottleneck_dim,
+                num_speakers,
+                attention_channels=attention_channels,
+                global_context=global_context,
+            )
         
         self.f0_type = cfg['losses'].get('f0_type', 'log')
         self.l_emo = EmoDistillLoss(bottleneck_dim, f0_type=self.f0_type)

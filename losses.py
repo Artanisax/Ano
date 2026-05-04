@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
+from speechbrain.lobes.models.ECAPA_TDNN import AttentiveStatisticsPooling
 
 class SpkDistillLoss(nn.Module):
     def __init__(self, dim: int, num_speakers: int):
@@ -80,18 +81,21 @@ class _GradReverseFn(Function):
 
 
 class QOutSpeakerAdvLoss(nn.Module):
-    def __init__(self, dim: int, num_speakers: int, hidden_dim: int = 256):
+    def __init__(self, dim: int, num_speakers: int, attention_channels: int = 128, global_context: bool = True):
         super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(dim, hidden_dim),
-            nn.LeakyReLU(0.1),
-            nn.Linear(hidden_dim, num_speakers),
+        self.pool = AttentiveStatisticsPooling(
+            channels=dim,
+            attention_channels=attention_channels,
+            global_context=global_context,
         )
+        self.norm = nn.BatchNorm1d(dim * 2)
+        self.out = nn.Linear(dim * 2, num_speakers)
 
     def forward(self, q_out: torch.Tensor, spk_ids: torch.Tensor, grl_scale: float = 1.0, return_logits: bool = False):
-        pooled = q_out.mean(dim=1)
-        pooled = _GradReverseFn.apply(pooled, grl_scale)
-        logits = self.proj(pooled)
+        x = _GradReverseFn.apply(q_out.transpose(1, 2), grl_scale)
+        pooled = self.pool(x).squeeze(-1)
+        pooled = self.norm(pooled)
+        logits = self.out(pooled)
         loss = F.cross_entropy(logits, spk_ids.long())
         if return_logits:
             return loss, logits

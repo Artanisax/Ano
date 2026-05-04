@@ -60,7 +60,8 @@ losses:
   enable_time_l1: false
   enable_qout_spk_adv: false
   qout_spk_grl_scale: 1.0
-  qout_spk_adv_hidden_dim: 256
+  qout_spk_adv_attention_channels: 128
+  qout_spk_adv_global_context: true
   mrstft_resolutions:
     - [2048, 320, 1280]
     - [1024, 160, 640]

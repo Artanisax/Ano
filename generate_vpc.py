@@ -62,11 +62,13 @@ def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: i
     仅生成匿名化音频的精简推理管道
     """
     device_type = "cuda" if device.startswith("cuda") else "cpu"
-    with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-        wav = wav.squeeze(1)  # [1,1,T] -> [1,T]
+    # with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+    with torch.inference_mode():
+        # wav: [1, 1, T] -> 保证 3D 格式，再取 [1, T] 给 compute_mel
+        wav = wav.reshape(1, 1, -1)  # safe reshape to [1, 1, T]
         # ───────── 1. 提取特征与原始身份 ─────────
         mel_params = get_stft_params(model.cfg, prefix='mel')
-        mel = compute_mel(wav, model.cfg['model']['n_mels'], 
+        mel = compute_mel(wav.squeeze(1), model.cfg['model']['n_mels'],
                           model.cfg['model']['sample_rate'], **mel_params).unsqueeze(1)
         feat = model.enc(wav)                     # [1, T_feat, 512]
         s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]

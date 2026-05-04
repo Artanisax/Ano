@@ -45,13 +45,15 @@ class AnonSystem(pl.LightningModule):
         self.l_lin = LinDistillLoss(cfg['model']['bottleneck']['codebook_size'], bottleneck_dim)
         self.enable_qout_spk_adv = cfg['losses'].get('enable_qout_spk_adv', False)
         self.lambda_qout_spk_adv = cfg['losses'].get('lambda_qout_spk_adv', 0.0)
-        self.qout_spk_grl_scale = cfg['losses'].get('qout_spk_grl_scale', 1.0)
+        self.qout_spk_grl_scale = cfg['losses'].get('qout_spk_grl_scale', 4.0)
         if self.enable_qout_spk_adv:
+            pooling_type = cfg['losses'].get('qout_spk_adv_pooling', 'statistic')
             attention_channels = cfg['losses'].get('qout_spk_adv_attention_channels', 128)
             global_context = cfg['losses'].get('qout_spk_adv_global_context', True)
             self.l_qout_spk = QOutSpeakerAdvLoss(
                 bottleneck_dim,
                 num_speakers,
+                pooling_type=pooling_type,
                 attention_channels=attention_channels,
                 global_context=global_context,
             )

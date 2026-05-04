@@ -80,14 +80,30 @@ class _GradReverseFn(Function):
         return -ctx.scale * grad_output, None
 
 
-class QOutSpeakerAdvLoss(nn.Module):
-    def __init__(self, dim: int, num_speakers: int, attention_channels: int = 128, global_context: bool = True):
+class StatisticPooling(nn.Module):
+    def __init__(self, eps: float = 1e-5):
         super().__init__()
-        self.pool = AttentiveStatisticsPooling(
-            channels=dim,
-            attention_channels=attention_channels,
-            global_context=global_context,
-        )
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=-1)
+        std = torch.sqrt(x.var(dim=-1, unbiased=False) + self.eps)
+        return torch.cat([mean, std], dim=1).unsqueeze(-1)
+
+
+class QOutSpeakerAdvLoss(nn.Module):
+    def __init__(self, dim: int, num_speakers: int, pooling_type: str = 'statistic', attention_channels: int = 128, global_context: bool = True):
+        super().__init__()
+        if pooling_type == 'attentive':
+            self.pool = AttentiveStatisticsPooling(
+                channels=dim,
+                attention_channels=attention_channels,
+                global_context=global_context,
+            )
+        elif pooling_type == 'statistic':
+            self.pool = StatisticPooling()
+        else:
+            raise ValueError(f"Unsupported q_out speaker adv pooling type: {pooling_type}")
         self.norm = nn.BatchNorm1d(dim * 2)
         self.out = nn.Linear(dim * 2, num_speakers)
 

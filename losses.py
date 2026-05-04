@@ -92,7 +92,15 @@ class StatisticPooling(nn.Module):
 
 
 class QOutSpeakerAdvLoss(nn.Module):
-    def __init__(self, dim: int, num_speakers: int, pooling_type: str = 'statistic', attention_channels: int = 128, global_context: bool = True):
+    def __init__(
+        self, dim: int,
+        num_speakers: int,
+        pooling_type: str = 'attentive',
+        attention_channels: int = 128,
+        global_context: bool = True,
+        bottleneck_dim: int = 128,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         if pooling_type == 'attentive':
             self.pool = AttentiveStatisticsPooling(
@@ -104,14 +112,28 @@ class QOutSpeakerAdvLoss(nn.Module):
             self.pool = StatisticPooling()
         else:
             raise ValueError(f"Unsupported q_out speaker adv pooling type: {pooling_type}")
+        
         self.norm = nn.BatchNorm1d(dim * 2)
-        self.out = nn.Linear(dim * 2, num_speakers)
+        self.bottleneck = nn.Sequential(
+            nn.Linear(dim * 2, bottleneck_dim),
+            nn.BatchNorm1d(bottleneck_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+        )
+        self.out = nn.Linear(bottleneck_dim, num_speakers)
 
-    def forward(self, q_out: torch.Tensor, spk_ids: torch.Tensor, grl_scale: float = 1.0, return_logits: bool = False):
+    def forward(
+        self,
+        q_out: torch.Tensor,
+        spk_ids: torch.Tensor,
+        grl_scale: float = 4.0,
+        return_logits: bool = False,
+    ):
         x = _GradReverseFn.apply(q_out.transpose(1, 2), grl_scale)
         pooled = self.pool(x).squeeze(-1)
         pooled = self.norm(pooled)
-        logits = self.out(pooled)
+        hidden = self.bottleneck(pooled)
+        logits = self.out(hidden)
         loss = F.cross_entropy(logits, spk_ids.long())
         if return_logits:
             return loss, logits

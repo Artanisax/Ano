@@ -283,7 +283,6 @@ class AnonSystem(pl.LightningModule):
         l_spk = self.l_spk.consistency_only(spk_s1, spk_s2)
         l_lin = self.l_lin(q1, tokens) if tokens is not None else torch.tensor(0.0, device=wav.device)
         l_emo_f0 = self.l_emo(q2, f0_main)
-        l_qout_spk = torch.tensor(0.0, device=wav.device)
         chroma_batch = batch.get('chroma')
         chroma_main = chroma_batch[:, 0] if chroma_batch is not None else None
         l_emo_chroma = self.l_chroma(q2, chroma_main) if (self.enable_chroma and chroma_main is not None) else torch.tensor(0.0, device=wav.device)
@@ -323,7 +322,6 @@ class AnonSystem(pl.LightningModule):
                 'val/com': com,
                 'val/spk_cons': l_spk,
                 'val/lin': l_lin,
-                'val/qout_spk_adv': l_qout_spk,
                 'val/emo_f0': l_emo_f0,
                 'val/emo_chroma': l_emo_chroma,
             },

@@ -178,10 +178,9 @@ def main():
     parser.add_argument('--vpc_data_dir', default='data', 
                         help='VPC2024 data 目录的路径 (包含 libri_dev, libri_test 等)')
     parser.add_argument('--out_dir',
-                        default='outputs/',  
-                        # default='../Voice-Privacy-Challenge-2024/data', 
+                        default='../Voice-Privacy-Challenge-2024/data', 
                         help='生成音频的输出根目录')
-    parser.add_argument('--anon_suffix', default='_ours', 
+    parser.add_argument('--anon_suffix', required=True, 
                         help='匿名化数据集后缀名，例如 _ours 将生成 libri_dev_ours')
     parser.add_argument('--datasets', nargs='+', 
                         default=[

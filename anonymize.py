@@ -60,7 +60,7 @@ def main():
     parser.add_argument('--config', required=True, help='训练/推理配置文件路径 (.yaml)')
     parser.add_argument('--pool', required=True, help='说话人特征池路径 (.pt 文件)')
     parser.add_argument('--input', default='data/raw/LibriSpeech/test-clean', help='输入音频文件 或 包含音频的目录')
-    parser.add_argument('--output', default='outputs/Ano', help='输出目录路径')
+    parser.add_argument('--output', required=True, help='输出目录路径')
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数；不传则使用配置文件')
     parser.add_argument('--seed', type=int, default=None, help='随机种子；不传则使用配置文件中的 random_seed')

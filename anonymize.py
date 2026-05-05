@@ -14,7 +14,8 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
     返回: (wav_rec, wav_anon) 均为 [1, T]
     """
     device_type = "cuda" if device.startswith("cuda") else "cpu"
-    with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+    # with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+    with torch.inference_mode():
         # wav: [1, 1, T] -> 保证 3D 格式，再取 [1, T] 给 compute_mel
         wav = wav.reshape(1, 1, -1)  # safe reshape to [1, 1, T]
         # ───────── 1. 提取特征与原始身份 ─────────

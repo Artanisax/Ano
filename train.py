@@ -63,6 +63,11 @@ def parse_args():
         default="configs.yaml",
         help="Path to the YAML config file",
     )
+    parser.add_argument(
+        "--resume_ckpt",
+        default=None,
+        help="Path to a checkpoint to resume training from",
+    )
     return parser.parse_args()
 
 def main():
@@ -70,6 +75,9 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     setup_seed(cfg.get('random_seed', 42))
+
+    if args.resume_ckpt is not None and not os.path.exists(args.resume_ckpt):
+        raise FileNotFoundError(f"Resume checkpoint not found: {args.resume_ckpt}")
     train_workers = cfg['training'].get('train_num_workers', cfg['training'].get('num_workers', 0))
     val_workers = cfg['training'].get('val_num_workers', cfg['training'].get('num_workers', 0))
     
@@ -147,7 +155,10 @@ def main():
         enable_autolog_hparams=True,
     )
     
-    trainer.fit(model, tr_dl, val_dl)
+    if args.resume_ckpt is not None:
+        print(f"🔁 Resuming training from checkpoint: {args.resume_ckpt}")
+
+    trainer.fit(model, tr_dl, val_dl, ckpt_path=args.resume_ckpt)
     print("🎉 Training completed.")
 
 if __name__ == "__main__":

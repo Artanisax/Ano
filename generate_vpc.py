@@ -58,50 +58,37 @@ def load_wav_from_scp(wav_path_or_cmd, target_sr: int = 16000):
     return sample
 
 def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: int):
-    """
-    仅生成匿名化音频的精简推理管道
-    """
-    device_type = "cuda" if device.startswith("cuda") else "cpu"
-    # with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+    """批量匿名化推理，wav: [B, 1, T]"""
     with torch.inference_mode():
-        # wav: [1, 1, T] -> 保证 3D 格式，再取 [1, T] 给 compute_mel
-        wav = wav.reshape(1, 1, -1)  # safe reshape to [1, 1, T]
-        # ───────── 1. 提取特征与原始身份 ─────────
+        bsz = wav.shape[0]
+        wav = wav.reshape(bsz, 1, -1)
         mel_params = get_stft_params(model.cfg, prefix='mel')
         mel = compute_mel(wav.squeeze(1), model.cfg['model']['n_mels'],
                           model.cfg['model']['sample_rate'], **mel_params).unsqueeze(1)
-        feat = model.enc(wav)                     # [1, T_feat, 512]
-        s_orig = model.spk_enc(mel).view(1, -1)   # [1, 512]
-        
-        # ───────── 2. 串行解耦 ─────────
-        r1 = feat - s_orig.unsqueeze(1)           # [1, T_feat, 512]
-        recon, _, _, _ = model.bottleneck(r1)     # recon: [1, T_feat, 512]
-        
-        # ───────── 3. 匿名化输出 ─────────
-        n_select = min(num_candidates, vctk_pool.size(0))
-        pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:n_select]
-        s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True).view(1, -1)
-        
-        # 高斯扰动
+        feat = model.enc(wav)
+        s_orig = model.spk_enc(mel)
+        r1 = feat - s_orig.unsqueeze(1)
+        recon, _, _, _ = model.bottleneck(r1)
+
         pool_mean = vctk_pool.mean(dim=0, keepdim=True)
         pool_std = vctk_pool.std(dim=0, keepdim=True)
-        s_hat = torch.randn(1, model.cfg['model']['dimension'], device=device)
-        s_hat = s_hat * pool_std + pool_mean
-        
-        s_anon = alpha * s_bar + (1.0 - alpha) * s_hat  # [1, 512]
-        
-        # --- 缩放 s_anon 使其与 s_orig 的模长(L2 Norm)一致 ---
-        # 避免因为 alpha 混合和采样导致向量能量漂移，影响解码器的分布假设
-        s_orig_norm = torch.linalg.vector_norm(s_orig, dim=-1, keepdim=True)
-        s_anon_norm = torch.linalg.vector_norm(s_anon, dim=-1, keepdim=True)
-        s_anon = s_anon * (s_orig_norm / (s_anon_norm + 1e-8))
-        
-        recon_anon = recon + s_anon.unsqueeze(1)
-        wav_anon = model.dec(recon_anon)
-        
-        return wav_anon
+        anon_vecs = []
+        for i in range(bsz):
+            n_select = min(num_candidates, vctk_pool.size(0))
+            pool_idx = torch.randperm(vctk_pool.size(0), device=device)[:n_select]
+            s_bar = vctk_pool[pool_idx].mean(dim=0, keepdim=True)
+            s_hat = torch.randn(1, model.cfg['model']['dimension'], device=device)
+            s_hat = s_hat * pool_std + pool_mean
+            s_anon = alpha * s_bar + (1.0 - alpha) * s_hat
+            s_orig_norm = torch.linalg.vector_norm(s_orig[i:i+1], dim=-1, keepdim=True)
+            s_anon_norm = torch.linalg.vector_norm(s_anon, dim=-1, keepdim=True)
+            anon_vecs.append(s_anon * (s_orig_norm / (s_anon_norm + 1e-8)))
 
-def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg, vctk_pool, alpha, num_candidates, device):
+        s_anon = torch.cat(anon_vecs, dim=0)
+        recon_anon = recon + s_anon.unsqueeze(1)
+        return model.dec(recon_anon)
+
+def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg, vctk_pool, alpha, num_candidates, device, batch_size):
     """处理单个 VPC 数据集，遵循 Kaldi 格式"""
     in_dir = Path(dataset_path)
     if not in_dir.exists() or not (in_dir / "wav.scp").exists():
@@ -133,39 +120,39 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
     success, fail = 0, 0
     new_scp_lines = []
     
-    for utid, wav_path_or_cmd in tqdm(scp_dict.items(), desc=f"Processing {dataset_name}"):
-        # try:
-            # 匿名化后的绝对保存路径
-            out_wav_path = out_wav_dir / f"{utid}.wav"
-            
-            # 使用官方类似的处理方式加载音频
-            wav = load_wav_from_scp(
-                wav_path_or_cmd,
-                target_sr=cfg['model'].get('sample_rate', 16000),
-            ).to(device).unsqueeze(0)
-            
-            # 长度保护
-            orig_len = wav.shape[-1]
-            pad_len = (hop_length - orig_len % hop_length) % hop_length
-            if pad_len > 0:
-                wav = F.pad(wav, (0, pad_len), mode='reflect')
-                
-            wav_anon = generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates)
-            
-            # 恢复 float32 进行保存
-            wav_anon = wav_anon.float()
-            
-            # 裁剪回原始长度
-            wav_anon = wav_anon[..., :orig_len]
-            
+    items = list(scp_dict.items())
+    for start in tqdm(range(0, len(items), batch_size), desc=f"Processing {dataset_name}", unit="batch"):
+        batch_items = items[start:start + batch_size]
+        batch_wavs, batch_meta = [], []
+
+        for utid, wav_path_or_cmd in batch_items:
+            try:
+                out_wav_path = out_wav_dir / f"{utid}.wav"
+                wav = load_wav_from_scp(
+                    wav_path_or_cmd,
+                    target_sr=cfg['model'].get('sample_rate', 16000),
+                ).to(device)
+                orig_len = wav.shape[-1]
+                pad_len = (hop_length - orig_len % hop_length) % hop_length
+                if pad_len > 0:
+                    wav = F.pad(wav, (0, pad_len), mode='reflect')
+                batch_wavs.append(wav.squeeze(0))
+                batch_meta.append((utid, out_wav_path, orig_len))
+            except Exception as e:
+                tqdm.write(f"❌ 失败 {utid}: {e}")
+                fail += 1
+
+        if not batch_wavs:
+            continue
+
+        wav_batch = torch.nn.utils.rnn.pad_sequence(batch_wavs, batch_first=True).unsqueeze(1)
+        wav_anon_batch = generate_anon_output(model, wav_batch, alpha, vctk_pool, device, num_candidates).float()
+
+        for i, (utid, out_wav_path, orig_len) in enumerate(batch_meta):
+            wav_anon = wav_anon_batch[i:i+1, :orig_len]
             save_audio(normalize_audio(wav_anon.cpu()), out_wav_path)
-            
-            # 记录新的 wav.scp 条目
             new_scp_lines.append(f"{utid} {out_wav_path.absolute()}\n")
             success += 1
-        # except Exception as e:
-        #     tqdm.write(f"❌ 失败 {utid}: {e}")
-        #     fail += 1
             
     # ───────── 3. 写入新的 wav.scp ─────────
     with open(out_dataset_dir / "wav.scp", 'w', encoding='utf-8') as f:
@@ -201,6 +188,7 @@ def main():
     parser.add_argument('--condition', type=int, choices=[3, 4], default=3, help='匿名化条件: 3(α=0.9) 或 4(α=0.8)')
     parser.add_argument('--num_candidates', type=int, default=None, help='匿名化候选说话人数')
     parser.add_argument('--seed', type=int, default=None, help='随机种子；不传则使用配置文件中的 random_seed')
+    parser.add_argument('--batch_size', type=int, default=32, help='推理 batch size，用于提升 GPU 利用率')
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", help='推理设备')
     args = parser.parse_args()
 
@@ -259,7 +247,8 @@ def main():
             vctk_pool=vctk_pool,
             alpha=alpha,
             num_candidates=num_candidates,
-            device=args.device
+            device=args.device,
+            batch_size=args.batch_size
         )
 
 if __name__ == "__main__":

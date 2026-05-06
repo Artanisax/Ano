@@ -42,7 +42,7 @@ def main():
                  glob.glob(os.path.join(vctk_dir, spk_id, "*.flac"))
         embs = []
         
-        with torch.no_grad():
+        with torch.inference_mode():
             for p in audios:
                 try:
                     w, sr = torchaudio.load(p)

@@ -14,27 +14,12 @@ def load_speaker_encoder(ckpt_path, cfg):
     encoder.load_state_dict(filtered_dict, strict=True)
     return encoder
 
-
-def encode_mel_batches(encoder, mel_list, device, batch_size: int):
-    embs = []
-    for start in range(0, len(mel_list), batch_size):
-        batch = mel_list[start:start + batch_size]
-        lengths = [m.shape[-1] for m in batch]
-        max_len = max(lengths)
-        mel_batch = torch.stack([F.pad(m, (0, max_len - m.shape[-1])) for m in batch], dim=0).to(device)
-        mask = torch.arange(max_len, device=device).unsqueeze(0) >= torch.tensor(lengths, device=device).unsqueeze(1)
-        batch_embs = encoder(mel_batch, mask=mask).cpu()
-        embs.extend(batch_embs.unbind(0))
-    return embs
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--ckpt', required=True)
     parser.add_argument('--vctk_dir', default='data/raw/VCTK/VCTK-Corpus-0.92/wav48_silence_trimmed')
     parser.add_argument('--output', default='data/vctk_speaker_vectors.pt')
-    parser.add_argument('--batch_size', type=int, default=32, help='SpeakerEncoder 提取说话人向量时的 batch size')
     args = parser.parse_args()
     
     with open(args.config) as f: cfg = yaml.safe_load(f)
@@ -55,26 +40,26 @@ def main():
     for spk_id in tqdm(spk_dirs, desc="VCTK Pool Extraction"):
         audios = glob.glob(os.path.join(vctk_dir, spk_id, "*.wav")) + \
                  glob.glob(os.path.join(vctk_dir, spk_id, "*.flac"))
-        mel_list = []
-
+        embs = []
+        
         with torch.inference_mode():
             for p in audios:
                 try:
                     w, sr = torchaudio.load(p)
-                    if w.dim() > 1:
-                        w = w.mean(dim=0, keepdim=True)
-                    if sr != 16000:
-                        w = torchaudio.functional.resample(w, sr, 16000)
-
+                    if w.dim() > 1: w = w.mean(dim=0, keepdim=True)
+                    if sr != 16000: w = torchaudio.functional.resample(w, sr, 16000)
+                    
                     w = w.to(device)
-                    mel = compute_mel(w, cfg['model']['n_mels'], 16000, **mel_params).unsqueeze(1).cpu()
-                    mel_list.append(mel.squeeze(0))  # [1, 80, T]
+                    # ✅ 参数化计算 Mel
+                    mel = compute_mel(w, cfg['model']['n_mels'], 16000, **mel_params)
+                    mel = mel.unsqueeze(1)  # [1, 1, 80, T] 匹配 2D CNN 输入
+                    emb = encoder(mel).squeeze(0).cpu()  # [D]
+                    embs.append(emb)
                 except Exception as e:
                     tqdm.write(f"⚠️ 跳过 {p}: {e}")
                     continue
-
-        if mel_list:
-            embs = encode_mel_batches(encoder, mel_list, device, args.batch_size)
+                    
+        if embs:
             speaker_vectors.append(torch.stack(embs).mean(dim=0))
             
     if not speaker_vectors:

@@ -1,10 +1,20 @@
-CONFIG=runs/Ano/Ablation_Spk_Adv_1/hparams_full.yaml
-CKPT=runs/Ano/Ablation_Spk_Adv_1/checkpoints/best/epoch=8-step=133188.ckpt
-POOL=runs/Ano/Ablation_Spk_Adv_1/vctk_speaker_vectors.pt
-SUFFIX=_Ablation_Spk_Adv
+CONFIG=runs/Ano/Ours_2/hparams_full.yaml
+CKPT=runs/Ano/Ours_2/checkpoints/best/epoch=9-step=149044.ckpt
+POOL=runs/Ano/Ours_2/vctk_speaker_vectors.pt
+SUFFIX=_Ours
+
+python extract_vctk_pool.py --config $CONFIG --ckpt $CKPT --output $POOL
+python generate_vpc.py --config $CONFIG --ckpt $CKPT --pool $POOL --anon_suffix $SUFFIX
+
+# ================================================================
+
+# CONFIG=runs/Ano/Ablation_Spk_Adv_1/hparams_full.yaml
+# CKPT=runs/Ano/Ablation_Spk_Adv_1/checkpoints/best/epoch=8-step=133188.ckpt
+# POOL=runs/Ano/Ablation_Spk_Adv_1/vctk_speaker_vectors.pt
+# SUFFIX=_Ablation_Spk_Adv
 
 # python extract_vctk_pool.py --config $CONFIG --ckpt $CKPT --output $POOL
-python generate_vpc.py --config $CONFIG --ckpt $CKPT --pool $POOL --anon_suffix $SUFFIX
+# python generate_vpc.py --config $CONFIG --ckpt $CKPT --pool $POOL --anon_suffix $SUFFIX
 
 # ================================================================
 

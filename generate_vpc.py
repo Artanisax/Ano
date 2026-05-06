@@ -57,6 +57,17 @@ def load_wav_from_scp(wav_path_or_cmd, target_sr: int = 16000):
 
     return sample
 
+def _estimate_scp_num_frames(wav_path_or_cmd) -> int:
+    if isinstance(wav_path_or_cmd, list):
+        wav_path_or_cmd = " ".join(str(x) for x in wav_path_or_cmd)
+    if isinstance(wav_path_or_cmd, str) and wav_path_or_cmd.strip().endswith("|"):
+        return -1
+    try:
+        return int(torchaudio.info(wav_path_or_cmd).num_frames)
+    except Exception:
+        return -1
+
+
 def generate_anon_output(model, wav, alpha, vctk_pool, device, num_candidates: int):
     """批量匿名化推理，wav: [B, 1, T]"""
     with torch.inference_mode():
@@ -112,15 +123,15 @@ def process_dataset(dataset_name, dataset_path, out_dir, anon_suffix, model, cfg
     # ───────── 2. 读取 wav.scp 并准备处理 ─────────
     wav_scp_path = in_dir / "wav.scp"
     scp_dict = read_kaldi_format(str(wav_scp_path))
-    
-    print(f"\n📂 开始处理数据集: {dataset_name} ({len(scp_dict)} 个音频段)")
+    items = sorted(scp_dict.items(), key=lambda kv: _estimate_scp_num_frames(kv[1]), reverse=True)
+
+    print(f"\n📂 开始处理数据集: {dataset_name} ({len(scp_dict)} 个音频段，已按长度排序)")
     print(f"   输出路径: {out_dataset_dir}")
     
     hop_length = cfg['model'].get('hop_length', 320)
     success, fail = 0, 0
     new_scp_lines = []
     
-    items = list(scp_dict.items())
     for start in tqdm(range(0, len(items), batch_size), desc=f"Processing {dataset_name}", unit="batch"):
         batch_items = items[start:start + batch_size]
         batch_wavs, batch_meta = [], []

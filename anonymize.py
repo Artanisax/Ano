@@ -1,5 +1,6 @@
 # anonymize.py
 import yaml, torch, argparse, os, glob, json
+import torchaudio
 from pathlib import Path
 from tqdm import tqdm
 from system import AnonSystem
@@ -41,6 +42,13 @@ def generate_dual_outputs(model, wav, alpha, vctk_pool, device, num_candidates: 
         recon_anon = recon + s_anon.unsqueeze(1)
         wav_anon = model.dec(recon_anon)
         return wav_rec, wav_anon
+
+def _estimate_num_frames(path: str) -> int:
+    try:
+        return int(torchaudio.info(path).num_frames)
+    except Exception:
+        return -1
+
 
 def main():
     parser = argparse.ArgumentParser(description="VPC 2024 语音匿名化推理脚本 (双输出: 重建 + 匿名)")
@@ -137,8 +145,9 @@ def main():
         if not audio_files:
             print(f"⚠️ 目录中未找到支持的音频格式 {args.ext}")
             return
-            
-        print(f"📁 发现 {len(audio_files)} 个音频文件，开始批量处理...\n")
+
+        audio_files = sorted(audio_files, key=_estimate_num_frames, reverse=True)
+        print(f"📁 发现 {len(audio_files)} 个音频文件，已按长度排序并开始批量处理...\n")
         success, fail = 0, 0
         hop_length = cfg['model'].get('hop_length', 320)
         

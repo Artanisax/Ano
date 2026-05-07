@@ -18,7 +18,7 @@ model:
     dropout: 0.1
   bottleneck:
     codebook_size: 1024
-    codebook_dim:128
+    codebook_dim: 128
     n_q: 8
     decay: 0.99
     commitment_weight: 1

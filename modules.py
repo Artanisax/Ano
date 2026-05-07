@@ -157,9 +157,12 @@ class ResidualBottleneck(nn.Module):
         super().__init__()
         bc = cfg['model']['bottleneck']
         hidden_dim = cfg['model']['dimension']
+        codebook_dim = bc.get('codebook_dim', hidden_dim)
         num_quantizers = bc.get('n_q', bc.get('num_quantizers', 8))
+        self.proj_in = nn.Linear(hidden_dim, codebook_dim) if codebook_dim != hidden_dim else nn.Identity()
+        self.proj_out = nn.Linear(codebook_dim, hidden_dim) if codebook_dim != hidden_dim else nn.Identity()
         self.rvq = ResidualVectorQuantization(
-            dim=hidden_dim,
+            dim=codebook_dim,
             codebook_size=bc['codebook_size'],
             num_quantizers=num_quantizers,
             decay=bc['decay'],
@@ -169,12 +172,13 @@ class ResidualBottleneck(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        h = x.transpose(1, 2)
+        h = self.proj_in(x)
+        h = h.transpose(1, 2)
         quantized_out, _, losses, quantized_list = self.rvq(h, layers=[0, 1])
         com = losses.mean() if losses.numel() > 0 else torch.tensor(0.0, device=x.device)
         q1 = quantized_list[0].transpose(1, 2)
         q2 = quantized_list[1].transpose(1, 2) if len(quantized_list) > 1 else torch.zeros_like(q1)
-        out = quantized_out.transpose(1, 2)
+        out = self.proj_out(quantized_out.transpose(1, 2))
         return out, q1, q2, com
 
 class Decoder(nn.Module):
